@@ -1,0 +1,53 @@
+---
+title: "Gemma"
+author: "Amrin (28th May,2026)"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+Gamma_max <- 0.20
+E_Light <- 300
+
+E <- seq(0, 1000, length.out = 300)  #E(t)
+
+gamma_new <- Gamma_max * (1 - exp(-E / E_Light)) #gemma(t) , equation 14
+
+plot(E, gamma_new,
+     type = "l",
+     xlab = "Radiation",
+     ylab = "gamma")
+
+```
+
+You can add options to executable code like this
+
+```{r}
+a <- 4.00
+b <- 10.00
+delta_max <- 0.06
+delta_v <- 0.125
+v_min <- 2^(-5)
+m <- 57
+i<- 1:m
+v_i <- v_min * 2^((i-1)*delta_v)
+delta_t <-(((a*v_i)^b)/(1+(a*v_i)^b))*delta_max
+
+plot (v_i, delta_t,
+      type = "l",
+      xlab = "cell volume",
+      ylab = "delta_t",
+      main = "behvaviour")
+
+
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).

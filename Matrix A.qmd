@@ -1,0 +1,88 @@
+---
+title: "Matrix A (Sosik)"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+library(reshape2)
+library(ggplot2)
+#equation 14 work - basically finding gamma (t)
+Gamma_max <- 0.20
+E_Light <- 1000 #proportion
+E <- seq(0,1000, length.out = 300)
+gamma_new <- Gamma_max * (1 - exp (-E / E_Light)) #eq 14
+
+#This is for equation 13
+v_min <- 2^-5
+delta_v <- 0.125
+m <- 57
+i <- 1:m
+v_i <- v_min * 2^ (( i - 1) * delta_v)
+
+# equation 13 parameters
+a <- 4.00
+b <- 10.00
+delta_max <- 0.06
+
+#eq 13
+delta_i <- (((a * v_i)^b) / (1 + (a * v_i)^b)) * delta_max
+
+# now matrix A 
+#for  square diagonal - growth - from i to i+1
+
+gamma_t <- 0.10  # here I tried with gamma_new but my code didn't work,
+                       # it said number of items to replace is not a 
+                       # multiple of replacement length , so i tried with a fixed gamma at                              certain point 
+A <- matrix(0, nrow = m, ncol = m)
+for (i in 1: ( m-1 )){
+  A[i+1, i] <- gamma_t * ( 1- delta_i [i])    #eq 7 
+  
+}
+
+#  Division - from i to 1
+j <- 1 + ( 1 / delta_v)
+for (i in 2:(j-1)) {
+  A[1,i] <- 2 * delta_i[i]
+}
+for (i in j:m) {
+  A[i + 1 - j, i] <- 2 * delta_i[i]
+}
+
+# Stasis for i = 1
+
+ A[1,1] <- ((1 - gamma_t) * ( 1 - delta_i[i]) ) + 2 * delta_i[i] 
+ 
+for ( i in 2: ( m - 1)) {
+ A[ i, i] <- (( 1 - gamma_t) * ( 1 - delta_i [i]) ) 
+}
+ A[ m,m] <- (1 - delta_i[i])
+
+A
+
+melted_A <- melt(A)
+ggplot(data = melted_A, aes(x=Var1, y=Var2, fill=value)) +
+  geom_tile(color = "white", linewidth = 0.5) + scale_color_gradient(low = "#FFFFFF", high = "#E41A1C")
+
+#samples
+bin_centers <- c(1, 2, 3, 4, 5)
+probabilities <- c(0.1, 0.2, 0.4, 0.2, 0.1) 
+n <- 10000
+simulated_sample <- sample(x = bin_centers, size = n, replace = TRUE, prob = probabilities)
+
+```
+
+You can add options to executable code like this
+
+```{}
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
