@@ -58,35 +58,39 @@ delta_i_t <- function(t, delta_max, a, b) {
 
 matrix_A <- function(t, gamma_max, delta_max, E_star, a, b) {
   
+  # creating A
   A <- matrix(0, nrow = m, ncol = m)
   
+  # creating gamma and delta
   gamma <- gamma_t(t, gamma_max, E_star)
   delta_i <- delta_i_t(t, delta_max, a, b)
   
+  # defining j
   j <- 1 + (1 / delta_v)
   
+  # sub-diagonal of A corresponding to growth
   for (i in 1:(m - 1)) {
     A[i + 1, i] <- gamma * (1 - delta_i[i])
   }
   
-  A[m, m] <- A[m, m] + gamma * (1 - delta_i[m])
-  
+  # first row of A corresponding to division
   for (i in 2:(j - 1)) {
     A[1, i] <- A[1, i] + 2 * delta_i[i]
   }
   
+  # upper-diagonal of A corresponding to division
   for (i in j:m) {
     smaller_class <- i + 1 - j
     A[smaller_class, i] <- A[smaller_class, i] + 2 * delta_i[i]
   }
   
+  # element of A corresponding to smallest size class
   A[1, 1] <- A[1, 1] + ((1 - gamma) * (1 - delta_i[1])) + 2 * delta_i[1]
   
-  for (i in 2:(m - 1)) {
+  # diagonal of A corresponding to stasis
+  for (i in 2:m) {
     A[i, i] <- A[i, i] + (1 - gamma) * (1 - delta_i[i])
   }
-  
-  A[m, m] <- A[m, m] + (1 - delta_i[m])
   
   return(A)
 }
