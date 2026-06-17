@@ -107,20 +107,20 @@ matrix_A <- function(t, gamma_max, delta_max, E_star, a, b) {  # these are some 
 }
 
 
-# Matrix B(t)
+# Matrix B(t) - hourly projection matrix - 6 A matrices are multiplied together on the left side .
 # 1 hour = 6 ten-minute A matrices
 
 
 matrix_B <- function(t, gamma_max, delta_max, E_star, a, b, dt = 1/6) {
   
-  B <- diag(m)        # creates 57X57 identity matrix - we need it because we will do matrix                            multiplication 
-  n_steps <- 1 / dt
+  B <- diag(m)        # creates 57X57 identity matrix - we need it because we will do matrix multiplication.                           
+  n_steps <- 1 / dt   # sub steps 
   
-  for (k in 0:(n_steps - 1)) {            # for k in 0:5
+  for (k in 0:(n_steps - 1)) {            # for k in 0:5, run the code inside the loop 6 times 
     
-    time_now <- t + k * dt
+    time_now <- t + k * dt   # compute current time 
     
-    A_k <- matrix_A(
+    A_k <- matrix_A(   # every loop iteration produces a new matrix 
       t = time_now,
       gamma_max = gamma_max,
       delta_max = delta_max,
@@ -132,11 +132,11 @@ matrix_B <- function(t, gamma_max, delta_max, E_star, a, b, dt = 1/6) {
     B <- A_k %*% B         #B = A_3 %*% A_2 %*% A_1 , initially B = I , B = A_0 %*% I
   }
   
-  return(B)
+  return(B)  
 }
 
 
-# Initial distribution w(0)
+# Initial distribution w(0) 
 
 w0 <- dnorm(size_index, mean = 20, sd= 6) # at time 0, most cells are around size class 20.
 w0 <- w0 / sum(w0)
