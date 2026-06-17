@@ -1,3 +1,4 @@
+# changing the values of parameters to see how gemma and delta plot changes 
 {r}
 Gamma_values <- c(0.10, 0.20, 0.30, 0.40)
 colors <- c("blue", "red", "green", "purple")
