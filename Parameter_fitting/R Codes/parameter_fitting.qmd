@@ -81,7 +81,7 @@ matrix_A <- function(t, gamma_max, delta_max, E_star, a, b) {  # these are some 
     A[i + 1, i] <- gamma * (1 - delta_i[i])
   }
   
-  
+   A[m, m] <- A[m, m] + gamma * (1 - delta_i[m])
   
   #  First row of A corresponding to Division
   for (i in 2:(j - 1)) {
@@ -102,6 +102,7 @@ matrix_A <- function(t, gamma_max, delta_max, E_star, a, b) {  # these are some 
   for (i in 2:m) {
     A[i, i] <- A[i, i] + (1 - gamma) * (1 - delta_i[i])
   }
+ A[m, m] <- A[m, m] + (1 - delta_i[m])
   
   return(A)
 }
@@ -136,21 +137,20 @@ matrix_B <- function(t, gamma_max, delta_max, E_star, a, b, dt = 1/6) {
 }
 
 
-# Initial distribution w(0) 
+# Initial distribution w(0) - dnorm makes a bell shaped distribution centrered around size class 20, then normalizes it.
 
-w0 <- dnorm(size_index, mean = 20, sd= 6) # at time 0, most cells are around size class 20.
+w0 <- dnorm(size_index, mean = 20, sd= 6) 
 w0 <- w0 / sum(w0)
-plot(v_i,w0)
+plot(v_i,w0)  # initial distribution against cell volume 
 
-#  true model distribution
+# true model distribution
 
+W_true <- matrix(0, nrow = hours, ncol = m)   # creates 24x57 matrix , each row is hour and each column is one size class.
+W_true[1, ] <- w0 # puts the initial distribution into the first row - row one is hour 0.
 
-W_true <- matrix(0, nrow = hours, ncol = m)
-W_true[1, ] <- w0 # puts the initial distribution into the first row.
-
-for (t in 1:(hours - 1)) {
+for (t in 1:(hours - 1)) {      # this loop takes the model forward one hour at a time.
   
-  B_t <- matrix_B(
+  B_t <- matrix_B(              # builds hourly matrix using true parameter values
     t = t,
     gamma_max = gamma_max_true,
     delta_max = delta_max_true,
@@ -159,16 +159,17 @@ for (t in 1:(hours - 1)) {
     b = b_true
   )
   
-  W_true[t + 1, ] <- B_t %*% W_true[t, ] #w(t+1) = B(t) w(t)
-  W_true[t + 1, ] <- W_true[t + 1, ] / sum(W_true[t + 1, ])
+  W_true[t + 1, ] <- B_t %*% W_true[t, ] #w(t+1) = B(t) w(t)    # projects the distribution by one hour. 
+  W_true[t + 1, ] <- W_true[t + 1, ] / sum(W_true[t + 1, ])     # normalizes it 
 }
 
-set.seed(123)
+# Generate fake observation data 
+set.seed(123)                                                    # random sampling  
 
-N <- 1000000 #create fake observation 
-Counts <- matrix(0, nrow = hours, ncol = m)
+N <- 1000000 #create fake observation                            # number of cell sampled at each hour which is 1000000
+Counts <- matrix(0, nrow = hours, ncol = m)                      # create a matrix to store the sampled counts.
 
-for (t in 1:hours) {
+for (t in 1:hours) {                                             # loops through each hour. 
   Counts[t, ] <- rmultinom(
     n = 1,
     size = N,
@@ -176,25 +177,27 @@ for (t in 1:hours) {
   )
 }
 
-W_obs <- Counts / rowSums(Counts) # fake noisy
+# W_obs is the fake observed size distritbution with sampling noise.
+W_obs <- Counts / rowSums(Counts) # normalization 
 
 # Model for guessed parameters
+#this function takes a guess parameter and produces predicted size distribution over 24 hour. 
 
-
-guess_model <- function(params,W) { #params = c(gamma_max, delta_max, E_star, a, b)
+guess_model <- function(params,W) {     # params = c(gamma_max, delta_max, E_star, a, b), it's a vector 
   
-  gamma_max <- params[1]
+  gamma_max <- params[1]  # providing positions to each parameters
   delta_max <- params[2]
   E_star <- params[3]
   a <- params[4]
   b <- params[5]
   
-  W_pred <- matrix(0, nrow = hours, ncol = m)
-  W_pred[1, ] <- W[1,]
+  W_pred <- matrix(0, nrow = hours, ncol = m)   # creating and empty matrix to store model predicted distribution 
+  W_pred[1, ] <- W[1,]                          # use the first distribution supplied to the function as initial condition 
+                                                # This distribution becomes the starting point for all future prediction 
   
-  for (t in 1:(hours - 1)) {
+  for (t in 1:(hours - 1)) {                    # moving the model forward one hour at a time.
     
-    B_t <- matrix_B( # hourly matrix 
+    B_t <- matrix_B(                            # one hour transition matrix using the guess parameters.
       t = t,
       gamma_max = gamma_max,
       delta_max = delta_max,
@@ -202,7 +205,9 @@ guess_model <- function(params,W) { #params = c(gamma_max, delta_max, E_star, a,
       a = a,
       b = b
     )
-    
+
+# project the distribution forward by one hour 
+
     W_pred[t + 1, ] <- B_t %*% W[t, ] #next step distribution # W(t+1) = B(t)w(t)
     W_pred[t + 1, ] <- W_pred[t + 1, ] / sum(W_pred[t + 1, ])
   }
@@ -211,41 +216,43 @@ guess_model <- function(params,W) { #params = c(gamma_max, delta_max, E_star, a,
 }
 
 
-# Objective function
+# Objective function - measures how well a guessed parameter set can reproduce the observed size distribution. 
 
 
 objective_function <- function(params,W) { # finds out how bad the guess is 
   
-  gamma_max <- params[1]
+  gamma_max <- params[1]  # providing positions for the parameters, basically extracting the parameters
   delta_max <- params[2]
   E_star <- params[3]
   a <- params[4]
   b <- params[5]
   
-  if (gamma_max < 0 || gamma_max > 0.5 ||
+  if (gamma_max < 0 || gamma_max > 0.5 ||  # providing ranges of values, if the values excceed ranges then it'll return a penalty value
       delta_max < 0 || delta_max > 0.5 ||
       E_star <= 0 ||
       a <= 0 ||
       b <= 0) {
     return(1e10)
   }
-  
+
+# using guess parameters to generate predicted distribution
+
   W_pred <- guess_model(params, W)
   error <- sum((W - W_pred)^2) # observed and predicted distributions.
   
   return(error)
 }
 
-# Fit parameters
+# Fit parameters 
 
 
 initial_guess <- c(0.20, 0.03, 500, 2, 2)
 
-fit <- optim( # objective function as small as possible 
+fit <- optim(                                             # objective function as small as possible 
   par = initial_guess,
   fn = objective_function,
   W = W_obs,
-  method = "L-BFGS-B", #allows lower and upper bounds.
+  method = "L-BFGS-B",                                    #allows lower and upper bounds.
   lower = c(0, 0, 100, 0.1, 0.1),
   upper = c(0.5, 0.15, 5000, 30, 10)
 )
