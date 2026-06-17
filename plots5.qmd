@@ -4,13 +4,7 @@ format: html
 editor: visual
 ---
 
-## Quarto
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
-
-## Running Code
-
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
 
 ```{r}
 
@@ -219,7 +213,7 @@ objective_function <- function(params, W) {
   return(error)
 }
 
-initial_guess <- c(0.30, 0.04, 600, 3, 3)
+initial_guess <- true_base
 
 fit <- optim(
   par = initial_guess,
@@ -274,11 +268,11 @@ print(plot_heatmap(W_fit, "Fitted Model Distribution"))
 
 
 param_ranges <- list(
-  gamma_max = seq(0.10, 0.30, length.out = 8),
-  delta_max = seq(0.01, 0.08, length.out = 8),
-  E_star    = seq(100, 1000, length.out = 8),
-  a         = seq(0.5, 4, length.out = 8),
-  b         = seq(0.5, 4, length.out = 8)
+  gamma_max = c(0.10, 0.15, 0.20, 0.25, 0.30),
+  delta_max = c(0.01, 0.02, 0.03, 0.05, 0.08),
+  E_star    = c(100, 300, 500, 700, 1000),
+  a         = c(0.5, 1, 2, 3, 4),
+  b         = c(0.5, 1, 2, 3, 4)
 )
 
 percent_error <- function(estimated, true) {
@@ -349,6 +343,8 @@ write.csv(
 
 
 # 5 sensitivity plots
+max_error <- max(abs(all_results$PercentError))
+max_error
 
 make_sensitivity_plot <- function(parameter_name) {
   
@@ -394,11 +390,6 @@ ggsave("sensitivity_a.png", p_a, width = 8, height = 5)
 ggsave("sensitivity_b.png", p_b, width = 8, height = 5)
 ```
 
-You can add options to executable code like this
 
-```{r}
-#| echo: false
-2 * 2
-```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+
