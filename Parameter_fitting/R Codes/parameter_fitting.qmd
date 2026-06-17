@@ -1,5 +1,5 @@
 ---
-title: "Practise"
+title: "Parameter Fitting"
 format: html
 editor: visual
 ---
@@ -13,45 +13,45 @@ Quarto enables you to weave together content and executable code into a finished
 When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
 
 ```{r}
+# background cleaning 
 rm(list = ls())
+
 
 library(reshape2)
 library(ggplot2)
 
-
-
-m <- 57
+# bin size 
+m <- 57  # 57 size classes 
 hours <- 24
 
+#minimum cell volume 
 v_min <- 2^(-5)
-delta_v <- 0.125
-size_index <- 1:m
-v_i <- v_min * 2^((size_index - 1) * delta_v)
+delta_v <- 0.125 #spacing between size classes 
+size_index <- 1:m 
+v_i <- v_min * 2^((size_index - 1) * delta_v) #  this vector contains cell volume for actual size classes i = 1,2,3,....,57 .
 
-# True parameters
-gamma_max_true <- 0.20
-delta_max_true <- 0.03
-E_star_true <- 500
-
-
-a_true <- 2
-b_true <- 2
+# True parameters (from Sosik)
+gamma_max_true <- 0.20 # max growth fraction 
+delta_max_true <- 0.03 # max division fraction 
+E_star_true <- 500 # Light intensity 
+a_true <- 2 # it controls the size where divisions becomes likely 
+b_true <- 2 # ut controls how sharply division increases with cell size 
 
 
 
-# Light function
-
+# Light function - Light level at time t 
+# This function helps us create the mock model 
 
 E_t <- function(t) {
   1000 * max(0, sin(2*pi * t / 24))
 }
 
-# Growth function
+# Growth function - eq 14. sosik 
 gamma_t <- function(t, gamma_max, E_star) {
   gamma_max * (1 - exp(-E_t(t) / E_star))
 }
 
-# Division function
+# Division function eq 13. sosik
 delta_i_t <- function(t, delta_max, a, b) {
   
   if (t < 6) { #t_d = 6 , before hour 6 the probability of division is 0.
@@ -63,42 +63,45 @@ delta_i_t <- function(t, delta_max, a, b) {
 }
 
 
-# Matrix A(t)
+  # Creating Matrix A(t)
 
-matrix_A <- function(t, gamma_max, delta_max, E_star, a, b) {
+matrix_A <- function(t, gamma_max, delta_max, E_star, a, b) {  # these are some parameters 
   
   A <- matrix(0, nrow = m, ncol = m)
-  
+
+# creating gemma and delta ( growth and division fucntions
   gamma <- gamma_t(t, gamma_max, E_star)
   delta_i <- delta_i_t(t, delta_max, a, b)
-  
+
+  # defining j from sosik eq 10
   j <- 1 + (1 / delta_v)
   
-  # Growth
+  # Growth - sub diagonal to A corresponding to growth 
   for (i in 1:(m - 1)) {
     A[i + 1, i] <- gamma * (1 - delta_i[i])
   }
   
-  A[m, m] <- A[m, m] + gamma * (1 - delta_i[m])
   
-  # Division
+  
+  #  First row of A corresponding to Division
   for (i in 2:(j - 1)) {
     A[1, i] <- A[1, i] + 2 * delta_i[i]
   }
-  
+
+# upper diagonal of A corresponding to division 
   for (i in j:m) {
     smaller_class <- i + 1 - j
     A[smaller_class, i] <- A[smaller_class, i] + 2 * delta_i[i]
   }
-  
+
+# element of A corresponding to smallest size class 
   # Stasis
   A[1, 1] <- A[1, 1] + ((1 - gamma) * (1 - delta_i[1])) + 2 * delta_i[1]
-  
-  for (i in 2:(m - 1)) {
+
+#diagonal of A corresponding to stasis 
+  for (i in 2:m) {
     A[i, i] <- A[i, i] + (1 - gamma) * (1 - delta_i[i])
   }
-  
-  A[m, m] <- A[m, m] + (1 - delta_i[m])
   
   return(A)
 }
