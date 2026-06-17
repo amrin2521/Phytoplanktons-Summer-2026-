@@ -1,0 +1,141 @@
+---
+title: "kkookk"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+Gamma_values <- c(0.10, 0.20, 0.30, 0.40)
+colors <- c("blue", "red", "green", "purple")
+
+E_Light <- 300
+E <- seq(0, 1000, length.out = 300)
+
+# First curve
+gamma_new <- Gamma_values[1] * (1 - exp(-E / E_Light))
+
+plot(E, gamma_new,
+     type = "l",
+     lwd = 2,
+     col = colors[1],
+     ylim = c(0, max(Gamma_values)),
+     xlab = "Radiation",
+     ylab = expression(gamma),
+     main = expression("Effect of different " ~ gamma[max]))
+
+# Remaining curves
+for (i in 2:length(Gamma_values)) {
+  
+  gamma_new <- Gamma_values[i] * (1 - exp(-E / E_Light))
+  
+  lines(E, gamma_new,
+        lwd = 2,
+        col = colors[i])
+}
+
+legend("bottomright",
+       legend = paste(expression(gamma[max]), "=", Gamma_values),
+       col = colors,
+       lwd = 2)
+```
+
+You can add options to executable code like this
+
+```{r}
+# parameter values
+delta_v <- 0.125
+v_min <- 2^(-5)
+m <- 57
+i <- 1:m
+v_i <- v_min * 2^((i - 1) * delta_v)
+
+colors <- c("blue", "red", "green", "purple")
+
+
+# 1. changing delta_max
+a <- 4
+b <- 10
+delta_values <- c(0.02, 0.04, 0.06, 0.08)
+
+plot(v_i,
+     delta_values[1] * ((a*v_i)^b)/(1 + (a*v_i)^b),
+     type = "l",
+     col = colors[1],
+     lwd = 2,
+     ylim = c(0, max(delta_values)),
+     xlab = "Cell volume",
+     ylab = "delta_i",
+     main = "Effect of delta_max")
+
+for(j in 2:length(delta_values)) {
+  delta_t <- delta_values[j] * ((a*v_i)^b)/(1 + (a*v_i)^b)
+  lines(v_i, delta_t, col = colors[j], lwd = 2)
+}
+
+legend("bottomright",
+       legend = paste("delta_max =", delta_values),
+       col = colors,
+       lwd = 2)
+
+
+# 2. changing a
+delta_max <- 0.06
+b <- 10
+a_values <- c(1, 2, 4, 8)
+
+plot(v_i,
+     delta_max * ((a_values[1]*v_i)^b)/(1 + (a_values[1]*v_i)^b),
+     type = "l",
+     col = colors[1],
+     lwd = 2,
+     ylim = c(0, delta_max),
+     xlab = "Cell volume",
+     ylab = "delta_i",
+     main = "Effect of a")
+
+for(j in 2:length(a_values)) {
+  delta_t <- delta_max * ((a_values[j]*v_i)^b)/(1 + (a_values[j]*v_i)^b)
+  lines(v_i, delta_t, col = colors[j], lwd = 2)
+}
+
+legend("bottomright",
+       legend = paste("a =", a_values),
+       col = colors,
+       lwd = 2)
+
+
+# 3. changing b
+delta_max <- 0.06
+a <- 4
+b_values <- c(2, 5, 10, 20)
+
+plot(v_i,
+     delta_max * ((a*v_i)^b_values[1])/(1 + (a*v_i)^b_values[1]),
+     type = "l",
+     col = colors[1],
+     lwd = 2,
+     ylim = c(0, delta_max),
+     xlab = "Cell volume",
+     ylab = "delta_i",
+     main = "Effect of b")
+
+for(j in 2:length(b_values)) {
+  delta_t <- delta_max * ((a*v_i)^b_values[j])/(1 + (a*v_i)^b_values[j])
+  lines(v_i, delta_t, col = colors[j], lwd = 2)
+}
+
+legend("bottomright",
+       legend = paste("b =", b_values),
+       col = colors,
+       lwd = 2)
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
