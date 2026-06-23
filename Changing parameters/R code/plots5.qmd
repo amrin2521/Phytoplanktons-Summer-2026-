@@ -386,7 +386,10 @@ for (param_name in names(param_ranges)) {
       EstimatedParameter = names(errors),
       TrueValue = as.numeric(true_params),
       EstimatedValue = as.numeric(estimated_sens),
-      PercentError = as.numeric(errors)
+      PercentError = as.numeric(errors),
+      #for convergence 
+      ObjectiveValue = fit_sens$value,
+      Convergence = fit_sens$convergence
     )
     
     all_results <- rbind(all_results, temp)
@@ -396,6 +399,13 @@ for (param_name in names(param_ranges)) {
 }
 
 print(all_results)
+#Modification one Convergence test
+# Check how many optimizer runs converged
+table(all_results$Convergence)
+
+# Print cases where optim did not converge
+bad_convergence <- subset(all_results, Convergence != 0)
+print(bad_convergence)
 
 write.csv(
   all_results,
