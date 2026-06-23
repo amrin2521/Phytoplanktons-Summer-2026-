@@ -496,6 +496,63 @@ bad_cases_top5 <- bad_cases[1:5, ]
 
 print("Top 5 bad parameter-recovery cases:")
 print(bad_cases_top5)
+
+
+
+# Plot heatmaps for the worst cases
+
+make_observed_for_case <- function(param_name, param_value) {
+  
+  true_params_case <- true_base
+  true_params_case[param_name] <- param_value
+  
+  W_true_case <- simulate_model(true_params_case)
+  
+  set.seed(123)
+  
+  Counts_case <- matrix(0, nrow = hours, ncol = m)
+  
+  for (t in 1:hours) {
+    Counts_case[t, ] <- rmultinom(
+      n = 1,
+      size = N,
+      prob = W_true_case[t, ]
+    )
+  }
+  
+  W_obs_case <- Counts_case / rowSums(Counts_case)
+  
+  return(list(
+    true_params = true_params_case,
+    W_true = W_true_case,
+    W_obs = W_obs_case
+  ))
+}
+
+
+for (case_number in 1:nrow(bad_cases_top5)) {
+  
+  param_name <- bad_cases_top5$VariedParameter[case_number]
+  param_value <- bad_cases_top5$VariedValue[case_number]
+  
+  case_data <- make_observed_for_case(param_name, param_value)
+  
+  print(
+    plot_heatmap(
+      case_data$W_true,
+      paste("TRUE heatmap for bad case:",
+            param_name, "=", param_value)
+    )
+  )
+  
+  print(
+    plot_heatmap(
+      case_data$W_obs,
+      paste("OBSERVED heatmap for bad case:",
+            param_name, "=", param_value)
+    )
+  )
+}
 ```
 
 You can add options to executable code like this
