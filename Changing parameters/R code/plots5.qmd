@@ -415,31 +415,37 @@ write.csv(
 
 
 # 5 sensitivity plots
-max_error <- max(abs(all_results$PercentError))
-max_error
+
 
 make_sensitivity_plot <- function(parameter_name) {
   
   plot_data <- subset(all_results,
                       VariedParameter == parameter_name)
-  
+  #addition for convergence 
+   plot_data$ConvergenceStatus <- ifelse (
+    plot_data$Convergence == 0,
+    "Converged",
+    "Did not converge"
+  )
   ggplot(
     plot_data,
     aes(
       x = VariedValue,
       y = PercentError,
       color = EstimatedParameter,
-      group = EstimatedParameter
+      group = EstimatedParameter,
+      shape = ConvergenceStatus
     )
   ) +
     geom_line(linewidth = 1) +
     geom_point(size = 2) +
     geom_hline(yintercept = 0,
                linetype = "dashed") +
-    
-    coord_cartesian(
-      ylim = c(-max_error, max_error)
-    ) +
+    scale_shape_manual(
+      values = c(
+        "Converged" = 16,
+        "Did not converge" = 1
+      )
     
     labs(
       title = paste("Parameter recovery for",
@@ -447,7 +453,8 @@ make_sensitivity_plot <- function(parameter_name) {
       x = paste("True value of",
                 parameter_name),
       y = "Percent error (%)",
-      color = "Estimated parameter"
+      color = "Estimated parameter",
+      shape = "Optimizer status"
     ) +
     theme_minimal()
 }
