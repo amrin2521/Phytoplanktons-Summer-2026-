@@ -475,6 +475,27 @@ ggsave("sensitivity_delta_max.png", p_delta, width = 8, height = 5)
 ggsave("sensitivity_E_star.png", p_E, width = 8, height = 5)
 ggsave("sensitivity_a.png", p_a, width = 8, height = 5)
 ggsave("sensitivity_b.png", p_b, width = 8, height = 5)
+
+
+##Heatmap Diagnosis 
+#absolute percent error
+all_results$AbsPercentError <- abs(all_results$PercentError)
+
+# Sort from worst error to best error
+ordered_results <- all_results[order(-all_results$AbsPercentError), ]
+
+# Keep one row per parameter setting
+# This tells us which varied parameter/value gave the worst recovery
+bad_cases <- ordered_results[
+  !duplicated(paste(ordered_results$VariedParameter,
+                    ordered_results$VariedValue)),
+]
+
+#  5 worst parameter settings
+bad_cases_top5 <- bad_cases[1:5, ]
+
+print("Top 5 bad parameter-recovery cases:")
+print(bad_cases_top5)
 ```
 
 You can add options to executable code like this
