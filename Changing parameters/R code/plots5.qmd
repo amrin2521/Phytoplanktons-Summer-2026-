@@ -19,20 +19,26 @@ rm(list = ls())
 library(ggplot2)
 library(reshape2)
 
+# Number of size classes
 m <- 57
 hours <- 24
-
+# min cell vol
 v_min <- 2^(-5)
+#spacing between size classes on log2 scale 
 delta_v <- 0.125
 size_index <- 1:m
+
+#Actual cell vol
 v_i <- v_min * 2^((size_index - 1) * delta_v)
 
+#true parameters from sosik
 gamma_max_true <- 0.20
 delta_max_true <- 0.03
 E_star_true <- 500
 a_true <- 2
 b_true <- 2
 
+#storing true paramters in a vector form
 true_base <- c(
   gamma_max = gamma_max_true,
   delta_max = delta_max_true,
@@ -41,14 +47,17 @@ true_base <- c(
   b         = b_true
 )
 
+#Light function 
 E_t <- function(t) {
   1000 * max(0, sin(2 * pi * t / 24))
 }
 
+#Growth fucntion 
 gamma_t <- function(t, gamma_max, E_star) {
   gamma_max * (1 - exp(-E_t(t) / E_star))
 }
 
+#Diision fucntion 
 delta_i_t <- function(t, delta_max, a, b) {
   if (t < 6) return(rep(0, m))
   
@@ -56,50 +65,65 @@ delta_i_t <- function(t, delta_max, a, b) {
   return(delta_i)
 }
 
+#one small time step transition matrix
 matrix_A <- function(t, gamma_max, delta_max, E_star, a, b) {
-  
+  #empty column filled with 0
   A <- matrix(0, nrow = m, ncol = m)
-  
+
+#Growth rate at t
   gamma <- gamma_t(t, gamma_max, E_star)
+#division rate for all size classes at time t 
   delta_i <- delta_i_t(t, delta_max, a, b)
   
   j <- 1 + (1 / delta_v)
-  
+
+#Growth term for the matrix A, from i to i+1
   for (i in 1:(m - 1)) {
     A[i + 1, i] <- gamma * (1 - delta_i[i])
   }
-  
+
+#Largest size class cannnot move after m 
+#Growing cells in class m stay in m 
   A[m, m] <- A[m, m] + gamma * (1 - delta_i[m])
-  
+
+#Division term for small size classes 
+#Some dividing cells produce daughters that go into size class 1
   for (i in 2:(j - 1)) {
     A[1, i] <- A[1, i] + 2 * delta_i[i]
   }
-  
+  #Diviison for larger size classes 
   for (i in j:m) {
     smaller_class <- i + 1 - j
     A[smaller_class, i] <- A[smaller_class, i] + 2 * delta_i[i]
   }
-  
+  #Stasis - ceels that don't grow or divide 
   A[1, 1] <- A[1, 1] + ((1 - gamma) * (1 - delta_i[1])) + 2 * delta_i[1]
-  
+
+#stasis 
   for (i in 2:(m - 1)) {
     A[i, i] <- A[i, i] + (1 - gamma) * (1 - delta_i[i])
   }
-  
+  #Stasis for largest size clases
   A[m, m] <- A[m, m] + (1 - delta_i[m])
   
   return(A)
 }
 
+#One hour transition matrix 
+#multiply Matrix A 6 times 
 matrix_B <- function(t, gamma_max, delta_max, E_star, a, b, dt = 1/6) {
-  
+
+#start with indentity matrix 
   B <- diag(m)
+#number of small time step inside one hour 
   n_steps <- 1 / dt
-  
+
+  #loop through the smaller time steps 
   for (k in 0:(n_steps - 1)) {
-    
+    #current time 
     time_now <- t + k * dt
-    
+
+# The transitin matrix at current time 
     A_k <- matrix_A(
       t = time_now,
       gamma_max = gamma_max,
@@ -115,22 +139,28 @@ matrix_B <- function(t, gamma_max, delta_max, E_star, a, b, dt = 1/6) {
   return(B)
 }
 
+#Initial size distribution 
+#creates bell shaped distribution centered around size 20
 w0 <- dnorm(size_index, mean = 20, sd = 6)
+#normalization so the proportion sums to 1 
 w0 <- w0 / sum(w0)
 
+#It takes the parameter vector and then generates full 24 hour true distribution 
 simulate_model <- function(params) {
-  
+  #extracting all the parameters 
   gamma_max <- params[1]
   delta_max <- params[2]
   E_star <- params[3]
   a <- params[4]
   b <- params[5]
-  
+
+#create an empty matrix to store the distribution for every hour 
   W <- matrix(0, nrow = hours, ncol = m)
+#put the initial distribution in the first row 
   W[1, ] <- w0
-  
+  # Move the distribution forward from hour 1 to hour 24
   for (t in 1:(hours - 1)) {
-    
+    # one hour transition matrix for hour t 
     B_t <- matrix_B(
       t = t,
       gamma_max = gamma_max,
@@ -139,21 +169,27 @@ simulate_model <- function(params) {
       a = a,
       b = b
     )
-    
+    # Predicting the next hour distribution 
     W[t + 1, ] <- B_t %*% W[t, ]
+    #normalisation 
     W[t + 1, ] <- W[t + 1, ] / sum(W[t + 1, ])
   }
   
   return(W)
 }
 
+#simulatign the true model using the true values of params 
 W_true <- simulate_model(true_base)
 
+#random sampling 
 set.seed(123)
 
+#total number of sampled cell at each hour 
 N <- 1000000
+#empty matrix to store fake cell counts 
 Counts <- matrix(0, nrow = hours, ncol = m)
 
+#fake observed counts at each hour 
 for (t in 1:hours) {
   Counts[t, ] <- rmultinom(
     n = 1,
@@ -162,8 +198,12 @@ for (t in 1:hours) {
   )
 }
 
+#counts into obs proportion 
 W_obs <- Counts / rowSums(Counts)
 
+# Guess model 
+# Move the distribution forward from hour 1 to hour 24
+# starts from first obs row 
 guess_model <- function(params, W) {
   
   gamma_max <- params[1]
@@ -171,10 +211,13 @@ guess_model <- function(params, W) {
   E_star <- params[3]
   a <- params[4]
   b <- params[5]
-  
+
+#empty matrix for predicted distribution 
   W_pred <- matrix(0, nrow = hours, ncol = m)
+#start prediction from the first obs distribution 
   W_pred[1, ] <- W[1, ]
-  
+
+#predict forward through tieme 
   for (t in 1:(hours - 1)) {
     
     B_t <- matrix_B(
@@ -185,14 +228,16 @@ guess_model <- function(params, W) {
       a = a,
       b = b
     )
-    
+    #predict next hour using the obs current row 
     W_pred[t + 1, ] <- B_t %*% W[t, ]
     W_pred[t + 1, ] <- W_pred[t + 1, ] / sum(W_pred[t + 1, ])
   }
   
   return(W_pred)
 }
-
+#objective fucntion 
+#This is what optim tries to minimize 
+#It measures the total sqrd differences between obs and predicted distribution 
 objective_function <- function(params, W) {
   
   gamma_max <- params[1]
@@ -200,7 +245,7 @@ objective_function <- function(params, W) {
   E_star <- params[3]
   a <- params[4]
   b <- params[5]
-  
+  # If parametrs are outside allowed range, return huge error 
   if (gamma_max < 0 || gamma_max > 0.5 ||
       delta_max < 0 || delta_max > 0.15 ||
       E_star <= 0 ||
@@ -208,13 +253,15 @@ objective_function <- function(params, W) {
       b <= 0) {
     return(1e10)
   }
-  
+  #predict distribution using guess param 
   W_pred <- guess_model(params, W)
+# errors 
   error <- sum((W - W_pred)^2)
   
   return(error)
 }
 
+#Use the true params as initial guess for opti
 initial_guess <- true_base
 
 fit <- optim(
@@ -225,10 +272,11 @@ fit <- optim(
   lower = c(0, 0, 100, 0.1, 0.1),
   upper = c(0.5, 0.15, 5000, 30, 10)
 )
-
+#Extract the estimated params from the optimizer output 
 estimated_params <- fit$par
+#Giving the esti params the same names as true params 
 names(estimated_params) <- names(true_base)
-
+#Result table comparing true and estimated param values 
 results <- data.frame(
   Parameter = names(true_base),
   True = true_base,
@@ -238,14 +286,21 @@ results <- data.frame(
 
 print(results)
 
+#Heatmaps 
+#turns distributin matrix to a heatmap 
 plot_heatmap <- function(W, title_name) {
-  
+  #convert matrix W into long format data frame 
   df <- melt(W)
+  # rename column for clarity
   colnames(df) <- c("Hour", "SizeClass", "Proportion")
-  
+
+  #hour index changing so that first row is hour 0
   df$Hour <- df$Hour - 1
+
+  #add actual cell volume corresponding to each size class 
   df$CellVolume <- v_i[df$SizeClass]
-  
+
+#create the heatmap
   ggplot(df, aes(x = CellVolume, y = Hour, fill = Proportion)) +
     geom_tile() +
     scale_x_log10() +
@@ -258,7 +313,7 @@ plot_heatmap <- function(W, title_name) {
     ) +
     theme_minimal()
 }
-
+#Fitted distribution using estimated params
 W_fit <- guess_model(estimated_params, W_obs)
 
 print(plot_heatmap(W_true, "True Model Distribution"))
@@ -276,26 +331,31 @@ param_ranges <- list(
 )
 
 
-
+# percent error 
 percent_error <- function(estimated, true) {
   (100 * (estimated - true) / true)
 }
-
+#empty data frame to store all the sensitivity results 
 all_results <- data.frame()
 
+#Loop over each params that will be varied 
 for (param_name in names(param_ranges)) {
-  
+  #loop over true value for that param
   for (param_value in param_ranges[[param_name]]) {
-    
+
+    #start from true param vector 
     true_params <- true_base
+    #replace the paramter that is only currently being varied 
     true_params[param_name] <- param_value
-    
+
+    #simulate the true distribution for this parameter set 
     W_true_sens <- simulate_model(true_params)
-    
+
+ #each sensitivity run uses reproducible fake data
     set.seed(123)
-    
+    #empty matrix 
     Counts <- matrix(0, nrow = hours, ncol = m)
-    
+    #fake obs counts for sensitivity run
     for (t in 1:hours) {
       Counts[t, ] <- rmultinom(
         n = 1,
@@ -305,7 +365,7 @@ for (param_name in names(param_ranges)) {
     }
     
     W_obs_sens <- Counts / rowSums(Counts)
-    
+    #fit the model to this fake obs sensitivity dataset 
     fit_sens <- optim(
       par = initial_guess,
       fn = objective_function,
@@ -319,7 +379,7 @@ for (param_name in names(param_ranges)) {
     names(estimated_sens) <- names(true_base)
     
     errors <- percent_error(estimated_sens, true_params)
-    
+    #store result 
     temp <- data.frame(
       VariedParameter = param_name,
       VariedValue = param_value,
