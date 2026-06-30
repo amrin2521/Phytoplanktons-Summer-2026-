@@ -1,0 +1,346 @@
+---
+title: "growth rate"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+rm(list = ls())
+
+library(ggplot2)
+library(reshape2)
+
+# basic model settings
+
+m <- 57
+hours <- 24
+
+v_min <- 2^(-5)
+delta_v <- 0.125
+size_index <- 1:m
+v_i <- v_min * 2^((size_index - 1) * delta_v)
+
+# true parameter values
+
+gamma_max_true <- 0.20
+delta_max_true <- 0.03
+E_star_true <- 500
+a_true <- 1
+b_true <- 2
+
+true_base <- c(
+  gamma_max = gamma_max_true,
+  delta_max = delta_max_true,
+  E_star    = E_star_true,
+  a         = a_true,
+  b         = b_true
+)
+
+# light, growth, and division functions
+
+E_t <- function(t) {
+  1000 * max(0, sin(2 * pi * t / 24))
+}
+
+gamma_t <- function(t, gamma_max, E_star) {
+  gamma_max * (1 - exp(-E_t(t) / E_star))
+}
+
+delta_i_t <- function(t, delta_max, a, b) {
+  
+  if (t < 6) {
+    return(rep(0, m))
+  }
+  
+  delta_i <- delta_max * ((a * v_i)^b / (1 + (a * v_i)^b))
+  
+  return(delta_i)
+}
+
+# matrix a
+
+matrix_A <- function(t, gamma_max, delta_max, E_star, a, b) {
+  
+  A <- matrix(0, nrow = m, ncol = m)
+  
+  gamma <- gamma_t(t, gamma_max, E_star)
+  delta_i <- delta_i_t(t, delta_max, a, b)
+  
+  j <- as.integer(1 + (1 / delta_v))
+  
+  for (i in 1:(m - 1)) {
+    A[i + 1, i] <- gamma * (1 - delta_i[i])
+  }
+  
+  A[m, m] <- A[m, m] + gamma * (1 - delta_i[m])
+  
+  for (i in 2:(j - 1)) {
+    A[1, i] <- A[1, i] + 2 * delta_i[i]
+  }
+  
+  for (i in j:m) {
+    smaller_class <- i + 1 - j
+    A[smaller_class, i] <- A[smaller_class, i] + 2 * delta_i[i]
+  }
+  
+  A[1, 1] <- A[1, 1] + ((1 - gamma) * (1 - delta_i[1])) + 2 * delta_i[1]
+  
+  for (i in 2:(m - 1)) {
+    A[i, i] <- A[i, i] + (1 - gamma) * (1 - delta_i[i])
+  }
+  
+  A[m, m] <- A[m, m] + (1 - delta_i[m])
+  
+  return(A)
+}
+
+# matrix b for one hour
+
+matrix_B <- function(t, gamma_max, delta_max, E_star, a, b, dt = 1/6) {
+  
+  B <- diag(m)
+  n_steps <- round(1 / dt)
+  
+  for (k in 0:(n_steps - 1)) {
+    
+    time_now <- t + k * dt
+    
+    A_k <- matrix_A(
+      t = time_now,
+      gamma_max = gamma_max,
+      delta_max = delta_max,
+      E_star = E_star,
+      a = a,
+      b = b
+    )
+    
+    B <- A_k %*% B
+  }
+  
+  return(B)
+}
+
+# initial distribution
+
+w0 <- dnorm(size_index, mean = 20, sd = 6)
+w0 <- w0 / sum(w0)
+
+# daily mu function
+
+daily_mu <- function(params) {
+  
+  gamma_max <- params["gamma_max"]
+  delta_max <- params["delta_max"]
+  E_star <- params["E_star"]
+  a <- params["a"]
+  b <- params["b"]
+  
+  u <- w0
+  
+  for (t in 0:(hours - 1)) {
+    
+    B_t <- matrix_B(
+      t = t,
+      gamma_max = gamma_max,
+      delta_max = delta_max,
+      E_star = E_star,
+      a = a,
+      b = b
+    )
+    
+    u <- as.numeric(B_t %*% u)
+  }
+  
+  mu <- log(sum(u))
+  
+  return(as.numeric(mu))
+}
+
+# test base mu
+
+mu_base <- daily_mu(true_base)
+
+print("base true mu")
+print(mu_base)
+
+# parameter grids
+
+param_ranges <- list(
+  gamma_max = seq(0.10, 0.30, length.out = 15),
+  delta_max = seq(0.01, 0.08, length.out = 15),
+  E_star    = seq(100, 1000, length.out = 15),
+  a         = seq(0.5, 4, length.out = 15),
+  b         = seq(0.5, 4, length.out = 15)
+)
+
+# compute true mu surface for one pair
+
+true_mu_surface <- function(param1, param2) {
+  
+  surface_results <- data.frame()
+  
+  for (value1 in param_ranges[[param1]]) {
+    
+    for (value2 in param_ranges[[param2]]) {
+      
+      test_params <- true_base
+      
+      test_params[param1] <- value1
+      test_params[param2] <- value2
+      
+      mu_value <- daily_mu(test_params)
+      
+      temp <- data.frame(
+        Pair = paste(param1, param2, sep = "_vs_"),
+        Param1 = param1,
+        Param2 = param2,
+        Param1Value = value1,
+        Param2Value = value2,
+        TrueMu = mu_value
+      )
+      
+      surface_results <- rbind(surface_results, temp)
+      
+      print(
+        paste(
+          "finished:",
+          param1, "=", round(value1, 4),
+          ",", param2, "=", round(value2, 4),
+          "| true mu =", round(mu_value, 6)
+        )
+      )
+    }
+  }
+  
+  return(surface_results)
+}
+
+# compute true mu surfaces for all unique parameter pairs
+
+parameter_names <- names(true_base)
+
+pair_list <- combn(parameter_names, 2, simplify = FALSE)
+
+all_true_mu_results <- data.frame()
+
+for (pair in pair_list) {
+  
+  param1 <- pair[1]
+  param2 <- pair[2]
+  
+  pair_surface <- true_mu_surface(param1, param2)
+  
+  all_true_mu_results <- rbind(all_true_mu_results, pair_surface)
+}
+
+print(all_true_mu_results)
+
+write.csv(
+  all_true_mu_results,
+  "true_mu_surface_results.csv",
+  row.names = FALSE
+)
+
+# plotting function for true mu surfaces
+
+make_true_mu_plot <- function(pair_name) {
+  
+  plot_data <- subset(all_true_mu_results, Pair == pair_name)
+  
+  param1_name <- unique(plot_data$Param1)
+  param2_name <- unique(plot_data$Param2)
+  
+  true_x <- true_base[param1_name]
+  true_y <- true_base[param2_name]
+  
+  ggplot(
+    plot_data,
+    aes(
+      x = Param1Value,
+      y = Param2Value,
+      fill = TrueMu
+    )
+  ) +
+    geom_tile(color = "white") +
+    geom_point(
+      data = data.frame(x = true_x, y = true_y),
+      aes(x = x, y = y),
+      inherit.aes = FALSE,
+      shape = 8,
+      size = 4,
+      color = "black"
+    ) +
+    scale_fill_gradientn(colors = c("blue", "cyan", "yellow", "red")) +
+    labs(
+      title = paste("true mu surface:", param1_name, "vs", param2_name),
+      subtitle = "black star = base true parameter pair",
+      x = paste("value of", param1_name),
+      y = paste("value of", param2_name),
+      fill = expression(mu[true])
+    ) +
+    theme_minimal()
+}
+
+# print and save all true mu plots
+
+pair_names <- unique(all_true_mu_results$Pair)
+
+true_mu_plots <- list()
+
+for (pair_name in pair_names) {
+  
+  p <- make_true_mu_plot(pair_name)
+  
+  true_mu_plots[[pair_name]] <- p
+  
+  print(p)
+  
+  ggsave(
+    filename = paste0("true_mu_surface_", pair_name, ".png"),
+    plot = p,
+    width = 7,
+    height = 5
+  )
+}
+
+# summary table
+
+mu_summary <- all_true_mu_results[
+  order(all_true_mu_results$TrueMu),
+  c(
+    "Pair",
+    "Param1Value",
+    "Param2Value",
+    "TrueMu"
+  )
+]
+
+print("lowest true mu values")
+print(head(mu_summary, 10))
+
+print("highest true mu values")
+print(tail(mu_summary, 10))
+
+write.csv(
+  mu_summary,
+  "true_mu_summary_sorted.csv",
+  row.names = FALSE
+)
+```
+
+You can add options to executable code like this
+
+```{r}
+#| echo: false
+2 * 2
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
