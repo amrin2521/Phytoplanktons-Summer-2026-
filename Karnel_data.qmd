@@ -1,0 +1,1662 @@
+---
+title: "neww"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+# ALL-DAYS MODEL SELECTION FOR THE 2012 SYNECHOCOCCUS DATA
+#
+# This script:
+#   1. reads and cleans the full GitHub data,
+#   2. finds every complete 24-hour period,
+#   3. fits the instantaneous-light model for each period,
+#   4. fits kernel models for several fixed tau_max values,
+#   5. compares models using penalized SSQ,
+#   6. saves progress and final CSV files,
+#   7. creates summary plots.
+#
+
+# Start with RUN_ALL_DAYS <- FALSE to test the first 3 days.
+# After that works, change it to TRUE.
+
+rm(list = ls())
+
+library(readr)
+library(dplyr)
+library(lubridate)
+library(here)
+library(ggplot2)
+
+
+RUN_ALL_DAYS <- FALSE
+
+# If TRUE, an interrupted all-days run will reuse the progress CSV
+# and skip dates already completed.
+RESUME_IF_PROGRESS_EXISTS <- TRUE
+
+tau_candidates <- c(
+  1,
+  3,
+  6,
+  12,
+  24,
+  33
+)
+
+optimizer_maxit <- 1000
+
+output_folder <- here(
+  "all_days_model_results"
+)
+
+if (!dir.exists(output_folder)) {
+  dir.create(
+    output_folder,
+    recursive = TRUE
+  )
+}
+
+# ------------------------------------------------------------
+# READ THE THREE REAL-DATA FILES
+# ------------------------------------------------------------
+
+light_raw <- read_csv(
+  here(
+    "merged_fcb_data_2012",
+    "E_data.csv"
+  ),
+  show_col_types = FALSE
+)
+
+cells_raw <- read_csv(
+  here(
+    "merged_fcb_data_2012",
+    "cells_size_dist_data.csv"
+  ),
+  show_col_types = FALSE
+)
+
+volume_data <- read_csv(
+  here(
+    "merged_fcb_data_2012",
+    "vol_bins.csv"
+  ),
+  show_col_types = FALSE
+)
+
+# ------------------------------------------------------------
+# CLEAN DATE-TIME COLUMNS
+# ------------------------------------------------------------
+
+light_raw <- light_raw |>
+  mutate(
+    date_time = parse_date_time(
+      date_time,
+      orders = c(
+        "ymd HMS",
+        "ymd HM",
+        "ymd"
+      ),
+      tz = "UTC"
+    )
+  )
+
+cells_raw <- cells_raw |>
+  mutate(
+    date_time = parse_date_time(
+      date_time,
+      orders = c(
+        "ymd HMS",
+        "ymd HM",
+        "ymd"
+      ),
+      tz = "UTC"
+    )
+  )
+
+# ------------------------------------------------------------
+# IDENTIFY SIZE-DISTRIBUTION COLUMNS
+# ------------------------------------------------------------
+
+size_columns <- grep(
+  "^w[0-9]+$",
+  names(cells_raw),
+  value = TRUE
+)
+
+if (length(size_columns) != 57) {
+  stop(
+    "The cell data do not contain exactly 57 size columns."
+  )
+}
+
+# ------------------------------------------------------------
+# REMOVE MISSING ROWS
+# ------------------------------------------------------------
+
+light_data <- light_raw |>
+  filter(
+    !is.na(date_time),
+    !is.na(E)
+  )
+
+cell_data <- cells_raw |>
+  filter(
+    !is.na(date_time),
+    !is.na(cells_per_ml),
+    if_all(
+      all_of(size_columns),
+      ~ !is.na(.x)
+    )
+  )
+
+v_i <- volume_data$v_i
+
+if (length(v_i) != 57) {
+  stop(
+    "The volume file does not contain exactly 57 volume bins."
+  )
+}
+
+# ------------------------------------------------------------
+# AVERAGE DUPLICATE TIMESTAMPS
+# ------------------------------------------------------------
+
+light_unique <- light_data |>
+  group_by(date_time) |>
+  summarise(
+    E = mean(
+      E,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) |>
+  arrange(date_time)
+
+cell_unique <- cell_data |>
+  group_by(date_time) |>
+  summarise(
+    cells_per_ml = mean(
+      cells_per_ml,
+      na.rm = TRUE
+    ),
+    across(
+      all_of(size_columns),
+      ~ mean(
+        .x,
+        na.rm = TRUE
+      )
+    ),
+    .groups = "drop"
+  ) |>
+  arrange(date_time)
+
+# ------------------------------------------------------------
+# FIND COMPLETE 24-HOUR PERIODS
+# ------------------------------------------------------------
+
+maximum_tau <- max(
+  tau_candidates
+)
+
+is_clean_period <- function(start_time) {
+  
+  expected_cell_times <- seq(
+    from = start_time,
+    by = "1 hour",
+    length.out = 24
+  )
+  
+  actual_cell_times <- cell_unique |>
+    filter(
+      date_time >= start_time,
+      date_time <= start_time + hours(23)
+    ) |>
+    pull(date_time)
+  
+  cells_complete <-
+    length(actual_cell_times) ==
+    length(expected_cell_times) &&
+    all(
+      as.numeric(actual_cell_times) ==
+        as.numeric(expected_cell_times)
+    )
+  
+  expected_light_times <- seq(
+    from = start_time - hours(maximum_tau),
+    to = start_time + hours(24),
+    by = "10 min"
+  )
+  
+  actual_light_times <- light_unique |>
+    filter(
+      date_time >= start_time - hours(maximum_tau),
+      date_time <= start_time + hours(24)
+    ) |>
+    pull(date_time)
+  
+  light_complete <-
+    length(actual_light_times) ==
+    length(expected_light_times) &&
+    all(
+      as.numeric(actual_light_times) ==
+        as.numeric(expected_light_times)
+    )
+  
+  return(
+    cells_complete &&
+      light_complete
+  )
+}
+
+candidate_starts <- cell_unique |>
+  filter(
+    hour(date_time) == 6,
+    minute(date_time) == 0,
+    second(date_time) == 0
+  ) |>
+  pull(date_time)
+
+clean_period_check <- vapply(
+  seq_along(candidate_starts),
+  function(i) {
+    is_clean_period(
+      candidate_starts[i]
+    )
+  },
+  logical(1)
+)
+
+clean_starts <- candidate_starts[
+  clean_period_check
+]
+
+cat(
+  "\nNUMBER OF COMPLETE 24-HOUR PERIODS:",
+  length(clean_starts),
+  "\n"
+)
+
+if (length(clean_starts) == 0) {
+  stop(
+    "No complete 24-hour periods were found."
+  )
+}
+
+# ------------------------------------------------------------
+# CHOOSE TEST MODE OR ALL-DAYS MODE
+# ------------------------------------------------------------
+
+if (RUN_ALL_DAYS) {
+  
+  days_to_run <- clean_starts
+  
+  cat(
+    "\nRUNNING ALL COMPLETE PERIODS:",
+    length(days_to_run),
+    "days\n"
+  )
+  
+} else {
+  
+  number_test_days <- min(
+    3,
+    length(clean_starts)
+  )
+  
+  days_to_run <- clean_starts[
+    seq_len(number_test_days)
+  ]
+  
+  cat(
+    "\nTEST MODE:",
+    number_test_days,
+    "days only\n"
+  )
+  
+  cat(
+    "After this works, change RUN_ALL_DAYS to TRUE.\n"
+  )
+}
+
+# ------------------------------------------------------------
+# FIT ONE COMPLETE 24-HOUR PERIOD
+# ------------------------------------------------------------
+
+fit_one_day <- function(
+    start_time,
+    tau_candidates,
+    optimizer_maxit
+) {
+  
+  date_label <- as.Date(
+    start_time,
+    tz = "UTC"
+  )
+  
+  cat(
+    "\n==================================================\n"
+  )
+  
+  cat(
+    "STARTING DAY:",
+    as.character(date_label),
+    "\n"
+  )
+  
+  cat(
+    "==================================================\n"
+  )
+  
+  # ----------------------------------------------------------
+  # PREPARE THIS DAY'S OBSERVED CELL DATA
+  # ----------------------------------------------------------
+  
+  cell_day <- cell_unique |>
+    filter(
+      date_time >= start_time,
+      date_time <= start_time + hours(23)
+    ) |>
+    arrange(date_time)
+  
+  light_day <- light_unique |>
+    filter(
+      date_time >= start_time - hours(max(tau_candidates)),
+      date_time <= start_time + hours(24)
+    ) |>
+    arrange(date_time)
+  
+  if (nrow(cell_day) != 24) {
+    stop(
+      paste(
+        "The selected day does not have 24 cell observations:",
+        date_label
+      )
+    )
+  }
+  
+  W_observed <- as.matrix(
+    cell_day[
+      ,
+      size_columns
+    ]
+  )
+  
+  W_observed <- W_observed /
+    rowSums(W_observed)
+  
+  number_hours <- nrow(
+    W_observed
+  )
+  
+  number_sizes <- ncol(
+    W_observed
+  )
+  
+  n_independent <- (
+    number_hours - 1
+  ) * (
+    number_sizes - 1
+  )
+  
+  # ----------------------------------------------------------
+  # PREPARE THIS DAY'S MEASURED LIGHT
+  # ----------------------------------------------------------
+  
+  light_model <- light_day |>
+    mutate(
+      model_hour = as.numeric(
+        difftime(
+          date_time,
+          start_time,
+          units = "hours"
+        )
+      )
+    ) |>
+    arrange(model_hour)
+  
+  E_t <- function(t) {
+    
+    minimum_time <- min(
+      light_model$model_hour
+    )
+    
+    maximum_time <- max(
+      light_model$model_hour
+    )
+    
+    if (
+      any(t < minimum_time) ||
+      any(t > maximum_time)
+    ) {
+      stop(
+        paste(
+          "Light requested outside available range.",
+          "Day:",
+          date_label,
+          "Requested:",
+          paste(t, collapse = ", ")
+        )
+      )
+    }
+    
+    light_value <- approx(
+      x = light_model$model_hour,
+      y = light_model$E,
+      xout = t,
+      method = "linear",
+      rule = 1
+    )$y
+    
+    return(
+      pmax(
+        light_value,
+        0
+      )
+    )
+  }
+  
+  kernel_weights <- function(
+    p,
+    tau_max
+  ) {
+    
+    if (
+      p <= 0 ||
+      p >= 1
+    ) {
+      stop(
+        "p must be strictly between 0 and 1."
+      )
+    }
+    
+    tau_values <- 0:tau_max
+    
+    weights <- p *
+      (1 - p)^tau_values
+    
+    weights <- weights /
+      sum(weights)
+    
+    return(
+      weights
+    )
+  }
+  
+  E_kernel <- function(
+    t,
+    p,
+    tau_max
+  ) {
+    
+    tau_values <- 0:tau_max
+    
+    weights <- kernel_weights(
+      p = p,
+      tau_max = tau_max
+    )
+    
+    past_light <- vapply(
+      tau_values,
+      function(tau) {
+        E_t(
+          t - tau
+        )
+      },
+      numeric(1)
+    )
+    
+    return(
+      sum(
+        weights *
+          past_light
+      )
+    )
+  }
+  
+  # ----------------------------------------------------------
+  # BIOLOGICAL MODEL
+  # ----------------------------------------------------------
+  
+  gamma_t <- function(
+    t,
+    gamma_max,
+    E_star,
+    model_type,
+    p = NULL,
+    tau_max = NULL
+  ) {
+    
+    if (model_type == "instantaneous") {
+      
+      effective_light <- E_t(
+        t
+      )
+      
+    } else if (model_type == "kernel") {
+      
+      effective_light <- E_kernel(
+        t = t,
+        p = p,
+        tau_max = tau_max
+      )
+      
+    } else {
+      
+      stop(
+        "Unknown model type."
+      )
+    }
+    
+    return(
+      gamma_max *
+        (
+          1 -
+            exp(
+              -effective_light /
+                E_star
+            )
+        )
+    )
+  }
+  
+  # Division is allowed at every time.
+  # The old t < 6 restriction is not used.
+  delta_i_t <- function(
+    t,
+    delta_max,
+    a,
+    b
+  ) {
+    
+    return(
+      delta_max *
+        (
+          (a * v_i)^b /
+            (
+              1 +
+                (a * v_i)^b
+            )
+        )
+    )
+  }
+  
+  matrix_A <- function(
+    t,
+    gamma_max,
+    delta_max,
+    E_star,
+    a,
+    b,
+    model_type,
+    p = NULL,
+    tau_max = NULL
+  ) {
+    
+    A <- matrix(
+      0,
+      nrow = number_sizes,
+      ncol = number_sizes
+    )
+    
+    gamma <- gamma_t(
+      t = t,
+      gamma_max = gamma_max,
+      E_star = E_star,
+      model_type = model_type,
+      p = p,
+      tau_max = tau_max
+    )
+    
+    delta_i <- delta_i_t(
+      t = t,
+      delta_max = delta_max,
+      a = a,
+      b = b
+    )
+    
+    delta_v <- 0.125
+    
+    j <- as.integer(
+      1 +
+        1 / delta_v
+    )
+    
+    # Growth
+    for (i in 1:(number_sizes - 1)) {
+      
+      A[i + 1, i] <-
+        A[i + 1, i] +
+        gamma *
+        (
+          1 -
+            delta_i[i]
+        )
+    }
+    
+    A[number_sizes, number_sizes] <-
+      A[number_sizes, number_sizes] +
+      gamma *
+      (
+        1 -
+          delta_i[number_sizes]
+      )
+    
+    # Division
+    for (i in 2:(j - 1)) {
+      
+      A[1, i] <-
+        A[1, i] +
+        2 *
+        delta_i[i]
+    }
+    
+    for (i in j:number_sizes) {
+      
+      smaller_class <- i + 1 - j
+      
+      A[smaller_class, i] <-
+        A[smaller_class, i] +
+        2 *
+        delta_i[i]
+    }
+    
+    # Stasis
+    A[1, 1] <-
+      A[1, 1] +
+      (
+        1 -
+          gamma
+      ) *
+      (
+        1 -
+          delta_i[1]
+      ) +
+      2 *
+      delta_i[1]
+    
+    for (i in 2:(number_sizes - 1)) {
+      
+      A[i, i] <-
+        A[i, i] +
+        (
+          1 -
+            gamma
+        ) *
+        (
+          1 -
+            delta_i[i]
+        )
+    }
+    
+    A[number_sizes, number_sizes] <-
+      A[number_sizes, number_sizes] +
+      (
+        1 -
+          gamma
+      ) *
+      (
+        1 -
+          delta_i[number_sizes]
+      )
+    
+    return(
+      A
+    )
+  }
+  
+  matrix_B <- function(
+    t,
+    gamma_max,
+    delta_max,
+    E_star,
+    a,
+    b,
+    model_type,
+    p = NULL,
+    tau_max = NULL,
+    dt = 1 / 6
+  ) {
+    
+    B <- diag(
+      number_sizes
+    )
+    
+    n_steps <- as.integer(
+      round(
+        1 / dt
+      )
+    )
+    
+    for (k in 0:(n_steps - 1)) {
+      
+      time_now <- t +
+        k *
+        dt
+      
+      A_k <- matrix_A(
+        t = time_now,
+        gamma_max = gamma_max,
+        delta_max = delta_max,
+        E_star = E_star,
+        a = a,
+        b = b,
+        model_type = model_type,
+        p = p,
+        tau_max = tau_max
+      )
+      
+      B <- A_k %*% B
+    }
+    
+    return(
+      B
+    )
+  }
+  
+  predict_size_distribution <- function(
+    params,
+    model_type,
+    tau_max = NULL
+  ) {
+    
+    gamma_max <- params[
+      "gamma_max"
+    ]
+    
+    delta_max <- params[
+      "delta_max"
+    ]
+    
+    E_star <- params[
+      "E_star"
+    ]
+    
+    a <- params[
+      "a"
+    ]
+    
+    b <- params[
+      "b"
+    ]
+    
+    if (model_type == "kernel") {
+      
+      p <- params[
+        "p"
+      ]
+      
+    } else {
+      
+      p <- NULL
+    }
+    
+    W_predicted <- matrix(
+      0,
+      nrow = number_hours,
+      ncol = number_sizes
+    )
+    
+    W_predicted[1, ] <-
+      W_observed[1, ]
+    
+    for (row in 1:(number_hours - 1)) {
+      
+      B_t <- matrix_B(
+        t = row - 1,
+        gamma_max = gamma_max,
+        delta_max = delta_max,
+        E_star = E_star,
+        a = a,
+        b = b,
+        model_type = model_type,
+        p = p,
+        tau_max = tau_max
+      )
+      
+      W_predicted[row + 1, ] <-
+        B_t %*%
+        W_predicted[row, ]
+      
+      total_predicted <- sum(
+        W_predicted[row + 1, ]
+      )
+      
+      if (
+        !is.finite(total_predicted) ||
+        total_predicted <= 0
+      ) {
+        stop(
+          "Invalid projected distribution."
+        )
+      }
+      
+      W_predicted[row + 1, ] <-
+        W_predicted[row + 1, ] /
+        total_predicted
+    }
+    
+    return(
+      W_predicted
+    )
+  }
+  
+  # ----------------------------------------------------------
+  # INSTANTANEOUS MODEL FIT
+  # ----------------------------------------------------------
+  
+  instantaneous_names <- c(
+    "gamma_max",
+    "delta_max",
+    "E_star",
+    "a",
+    "b"
+  )
+  
+  instantaneous_start <- c(
+    gamma_max = 0.20,
+    delta_max = 0.03,
+    E_star = 500,
+    a = 2,
+    b = 2
+  )
+  
+  instantaneous_lower <- c(
+    gamma_max = 0.001,
+    delta_max = 0.001,
+    E_star = 10,
+    a = 0.1,
+    b = 0.1
+  )
+  
+  instantaneous_upper <- c(
+    gamma_max = 0.5,
+    delta_max = 0.15,
+    E_star = 5000,
+    a = 30,
+    b = 10
+  )
+  
+  instantaneous_objective <- function(x) {
+    
+    params <- setNames(
+      as.numeric(x),
+      instantaneous_names
+    )
+    
+    result <- tryCatch({
+      
+      W_predicted <- predict_size_distribution(
+        params = params,
+        model_type = "instantaneous"
+      )
+      
+      sse <- sum(
+        (
+          W_observed[-1, ] -
+            W_predicted[-1, ]
+        )^2
+      )
+      
+      if (!is.finite(sse)) {
+        return(1e10)
+      }
+      
+      return(sse)
+      
+    }, error = function(e) {
+      
+      return(1e10)
+      
+    })
+    
+    return(result)
+  }
+  
+  instantaneous_fit <- optim(
+    par = unname(
+      instantaneous_start
+    ),
+    fn = instantaneous_objective,
+    method = "L-BFGS-B",
+    lower = unname(
+      instantaneous_lower
+    ),
+    upper = unname(
+      instantaneous_upper
+    ),
+    control = list(
+      maxit = optimizer_maxit,
+      parscale = c(
+        0.20,
+        0.03,
+        500,
+        2,
+        2
+      )
+    )
+  )
+  
+  instantaneous_params <- setNames(
+    instantaneous_fit$par,
+    instantaneous_names
+  )
+  
+  instantaneous_penalized <-
+    instantaneous_fit$value /
+    (
+      n_independent -
+        2 * 5
+    )
+  
+  instantaneous_row <- data.frame(
+    Date = date_label,
+    Start_Time = as.character(
+      start_time
+    ),
+    Model = "Instantaneous",
+    tau_max = NA_real_,
+    k = 5,
+    gamma_max = unname(
+      instantaneous_params[
+        "gamma_max"
+      ]
+    ),
+    delta_max = unname(
+      instantaneous_params[
+        "delta_max"
+      ]
+    ),
+    E_star = unname(
+      instantaneous_params[
+        "E_star"
+      ]
+    ),
+    a = unname(
+      instantaneous_params[
+        "a"
+      ]
+    ),
+    b = unname(
+      instantaneous_params[
+        "b"
+      ]
+    ),
+    p = NA_real_,
+    SSE = instantaneous_fit$value,
+    Penalized_SSQ_fixed_model =
+      instantaneous_penalized,
+    Convergence =
+      instantaneous_fit$convergence,
+    n_independent =
+      n_independent,
+    stringsAsFactors = FALSE
+  )
+  
+  cat(
+    "Instantaneous SSE:",
+    instantaneous_fit$value,
+    "\n"
+  )
+  
+  # ----------------------------------------------------------
+  # KERNEL MODEL FITS
+  # ----------------------------------------------------------
+  
+  kernel_names <- c(
+    "gamma_max",
+    "delta_max",
+    "E_star",
+    "a",
+    "b",
+    "p"
+  )
+  
+  kernel_start <- c(
+    gamma_max = 0.20,
+    delta_max = 0.03,
+    E_star = 500,
+    a = 2,
+    b = 2,
+    p = 0.90
+  )
+  
+  kernel_lower <- c(
+    gamma_max = 0.001,
+    delta_max = 0.001,
+    E_star = 10,
+    a = 0.1,
+    b = 0.1,
+    p = 0.001
+  )
+  
+  kernel_upper <- c(
+    gamma_max = 0.5,
+    delta_max = 0.15,
+    E_star = 5000,
+    a = 30,
+    b = 10,
+    p = 0.999
+  )
+  
+  kernel_rows <- data.frame()
+  
+  for (tau_value in tau_candidates) {
+    
+    cat(
+      "  Kernel tau_max =",
+      tau_value,
+      "\n"
+    )
+    
+    kernel_objective <- function(x) {
+      
+      params <- setNames(
+        as.numeric(x),
+        kernel_names
+      )
+      
+      result <- tryCatch({
+        
+        W_predicted <- predict_size_distribution(
+          params = params,
+          model_type = "kernel",
+          tau_max = tau_value
+        )
+        
+        sse <- sum(
+          (
+            W_observed[-1, ] -
+              W_predicted[-1, ]
+          )^2
+        )
+        
+        if (!is.finite(sse)) {
+          return(1e10)
+        }
+        
+        return(sse)
+        
+      }, error = function(e) {
+        
+        return(1e10)
+        
+      })
+      
+      return(result)
+    }
+    
+    starting_sse <- kernel_objective(
+      unname(
+        kernel_start
+      )
+    )
+    
+    if (
+      !is.finite(starting_sse) ||
+      starting_sse >= 1e10
+    ) {
+      
+      kernel_rows <- bind_rows(
+        kernel_rows,
+        data.frame(
+          Date = date_label,
+          Start_Time = as.character(
+            start_time
+          ),
+          Model = "Kernel",
+          tau_max = tau_value,
+          k = 6,
+          gamma_max = NA_real_,
+          delta_max = NA_real_,
+          E_star = NA_real_,
+          a = NA_real_,
+          b = NA_real_,
+          p = NA_real_,
+          SSE = NA_real_,
+          Penalized_SSQ_fixed_model =
+            NA_real_,
+          Convergence = 999,
+          n_independent =
+            n_independent,
+          stringsAsFactors = FALSE
+        )
+      )
+      
+      next
+    }
+    
+    kernel_fit <- optim(
+      par = unname(
+        kernel_start
+      ),
+      fn = kernel_objective,
+      method = "L-BFGS-B",
+      lower = unname(
+        kernel_lower
+      ),
+      upper = unname(
+        kernel_upper
+      ),
+      control = list(
+        maxit = optimizer_maxit,
+        parscale = c(
+          0.20,
+          0.03,
+          500,
+          2,
+          2,
+          0.50
+        )
+      )
+    )
+    
+    kernel_params <- setNames(
+      kernel_fit$par,
+      kernel_names
+    )
+    
+    kernel_penalized <-
+      kernel_fit$value /
+      (
+        n_independent -
+          2 * 6
+      )
+    
+    kernel_rows <- bind_rows(
+      kernel_rows,
+      data.frame(
+        Date = date_label,
+        Start_Time = as.character(
+          start_time
+        ),
+        Model = "Kernel",
+        tau_max = tau_value,
+        k = 6,
+        gamma_max = unname(
+          kernel_params[
+            "gamma_max"
+          ]
+        ),
+        delta_max = unname(
+          kernel_params[
+            "delta_max"
+          ]
+        ),
+        E_star = unname(
+          kernel_params[
+            "E_star"
+          ]
+        ),
+        a = unname(
+          kernel_params[
+            "a"
+          ]
+        ),
+        b = unname(
+          kernel_params[
+            "b"
+          ]
+        ),
+        p = unname(
+          kernel_params[
+            "p"
+          ]
+        ),
+        SSE = kernel_fit$value,
+        Penalized_SSQ_fixed_model =
+          kernel_penalized,
+        Convergence =
+          kernel_fit$convergence,
+        n_independent =
+          n_independent,
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+  
+  all_rows <- bind_rows(
+    instantaneous_row,
+    kernel_rows
+  )
+  
+  return(
+    all_rows
+  )
+}
+
+# ------------------------------------------------------------
+# RUN THE SELECTED DAYS
+# ------------------------------------------------------------
+
+progress_results_file <- file.path(
+  output_folder,
+  "all_model_results_progress.csv"
+)
+
+progress_failed_file <- file.path(
+  output_folder,
+  "failed_days_progress.csv"
+)
+
+all_model_results <- data.frame()
+failed_days <- data.frame()
+
+if (
+  RESUME_IF_PROGRESS_EXISTS &&
+  file.exists(progress_results_file)
+) {
+  
+  all_model_results <- read_csv(
+    progress_results_file,
+    show_col_types = FALSE
+  )
+  
+  cat(
+    "\nRESUMING FROM EXISTING PROGRESS FILE.\n"
+  )
+}
+
+if (
+  RESUME_IF_PROGRESS_EXISTS &&
+  file.exists(progress_failed_file)
+) {
+  
+  failed_days <- read_csv(
+    progress_failed_file,
+    show_col_types = FALSE
+  )
+}
+
+completed_dates <- unique(
+  as.Date(
+    all_model_results$Date
+  )
+)
+
+remaining_days <- days_to_run[
+  !as.Date(days_to_run) %in%
+    completed_dates
+]
+
+cat(
+  "\nDAYS ALREADY COMPLETED:",
+  length(completed_dates),
+  "\n"
+)
+
+cat(
+  "DAYS LEFT TO RUN:",
+  length(remaining_days),
+  "\n"
+)
+
+for (day_index in seq_along(remaining_days)) {
+  
+  current_start <- remaining_days[
+    day_index
+  ]
+  
+  day_result <- tryCatch(
+    
+    fit_one_day(
+      start_time = current_start,
+      tau_candidates = tau_candidates,
+      optimizer_maxit = optimizer_maxit
+    ),
+    
+    error = function(e) {
+      
+      failed_days <<- bind_rows(
+        failed_days,
+        data.frame(
+          Start_Time =
+            as.character(
+              current_start
+            ),
+          Error =
+            conditionMessage(e),
+          stringsAsFactors = FALSE
+        )
+      )
+      
+      return(NULL)
+    }
+  )
+  
+  if (!is.null(day_result)) {
+    
+    all_model_results <- bind_rows(
+      all_model_results,
+      day_result
+    )
+  }
+  
+  write_csv(
+    all_model_results,
+    file.path(
+      output_folder,
+      "all_model_results_progress.csv"
+    )
+  )
+  
+  write_csv(
+    failed_days,
+    file.path(
+      output_folder,
+      "failed_days_progress.csv"
+    )
+  )
+  
+  cat(
+    "\nFINISHED",
+    day_index,
+    "OF",
+    length(remaining_days),
+    "REMAINING DAYS\n"
+  )
+}
+
+# ------------------------------------------------------------
+# SAVE ALL FITTED MODEL RESULTS
+# ------------------------------------------------------------
+
+write_csv(
+  all_model_results,
+  file.path(
+    output_folder,
+    "all_model_results.csv"
+  )
+)
+
+write_csv(
+  failed_days,
+  file.path(
+    output_folder,
+    "failed_days.csv"
+  )
+)
+
+# ------------------------------------------------------------
+# BUILD ONE SUMMARY ROW PER DAY
+# ------------------------------------------------------------
+
+instantaneous_daily <- all_model_results |>
+  filter(
+    Model == "Instantaneous"
+  ) |>
+  transmute(
+    Date,
+    Instantaneous_SSE = SSE,
+    Instantaneous_Penalized_k5 =
+      Penalized_SSQ_fixed_model,
+    Instantaneous_Convergence =
+      Convergence
+  )
+
+best_kernel_daily <- all_model_results |>
+  filter(
+    Model == "Kernel",
+    is.finite(SSE)
+  ) |>
+  group_by(Date) |>
+  slice_min(
+    order_by = SSE,
+    n = 1,
+    with_ties = FALSE
+  ) |>
+  ungroup() |>
+  transmute(
+    Date,
+    Best_tau_max = tau_max,
+    Best_p = p,
+    Best_Kernel_SSE = SSE,
+    Best_Kernel_Penalized_k6 =
+      Penalized_SSQ_fixed_model,
+    n_independent,
+    Best_Kernel_Convergence =
+      Convergence
+  ) |>
+  mutate(
+    # Because tau_max was selected from the data,
+    # this version counts it as an additional parameter.
+    Best_Kernel_Penalized_k7 =
+      Best_Kernel_SSE /
+      (
+        n_independent -
+          2 * 7
+      )
+  )
+
+daily_model_summary <- instantaneous_daily |>
+  left_join(
+    best_kernel_daily,
+    by = "Date"
+  ) |>
+  mutate(
+    Preferred_Model_k7 =
+      case_when(
+        is.na(
+          Best_Kernel_Penalized_k7
+        ) ~ "Instantaneous",
+        Instantaneous_Penalized_k5 <=
+          Best_Kernel_Penalized_k7 ~
+          "Instantaneous",
+        TRUE ~ "Kernel"
+      ),
+    Penalized_Difference =
+      Best_Kernel_Penalized_k7 -
+      Instantaneous_Penalized_k5
+  )
+
+write_csv(
+  daily_model_summary,
+  file.path(
+    output_folder,
+    "daily_model_summary.csv"
+  )
+)
+
+# ------------------------------------------------------------
+# OVERALL SUMMARY
+# ------------------------------------------------------------
+
+preference_counts <- daily_model_summary |>
+  count(
+    Preferred_Model_k7,
+    name = "Number_of_Days"
+  )
+
+write_csv(
+  preference_counts,
+  file.path(
+    output_folder,
+    "preferred_model_counts.csv"
+  )
+)
+
+cat(
+  "\nFINAL PREFERRED-MODEL COUNTS\n"
+)
+
+print(
+  preference_counts
+)
+
+cat(
+  "\nFIRST DAILY SUMMARY ROWS\n"
+)
+
+print(
+  head(
+    daily_model_summary
+  )
+)
+
+# ------------------------------------------------------------
+# SUMMARY PLOTS
+# ------------------------------------------------------------
+
+preference_plot <- ggplot(
+  preference_counts,
+  aes(
+    x = Preferred_Model_k7,
+    y = Number_of_Days
+  )
+) +
+  geom_col() +
+  labs(
+    title =
+      "Preferred Model Across Complete 24-Hour Periods",
+    x =
+      "Preferred model",
+    y =
+      "Number of periods"
+  ) +
+  theme_minimal(
+    base_size = 13
+  )
+
+ggsave(
+  filename = file.path(
+    output_folder,
+    "preferred_model_counts.png"
+  ),
+  plot = preference_plot,
+  width = 7,
+  height = 5,
+  dpi = 300
+)
+
+p_plot <- ggplot(
+  daily_model_summary,
+  aes(
+    x = Date,
+    y = Best_p
+  )
+) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title =
+      "Estimated Kernel Memory Parameter Across Days",
+    x =
+      "Date",
+    y =
+      "Best fitted p"
+  ) +
+  theme_minimal(
+    base_size = 13
+  )
+
+ggsave(
+  filename = file.path(
+    output_folder,
+    "best_p_by_date.png"
+  ),
+  plot = p_plot,
+  width = 9,
+  height = 5,
+  dpi = 300
+)
+
+tau_plot <- ggplot(
+  daily_model_summary,
+  aes(
+    x = Date,
+    y = Best_tau_max
+  )
+) +
+  geom_point() +
+  labs(
+    title =
+      "Selected Kernel Memory Length Across Days",
+    x =
+      "Date",
+    y =
+      expression(
+        tau[max]
+      )
+  ) +
+  theme_minimal(
+    base_size = 13
+  )
+
+ggsave(
+  filename = file.path(
+    output_folder,
+    "best_tau_by_date.png"
+  ),
+  plot = tau_plot,
+  width = 9,
+  height = 5,
+  dpi = 300
+)
+
+difference_plot <- ggplot(
+  daily_model_summary,
+  aes(
+    x = Date,
+    y = Penalized_Difference
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title =
+      "Kernel Minus Instantaneous Penalized SSQ",
+    subtitle =
+      "Positive values favor the instantaneous model; negative values favor the kernel model",
+    x =
+      "Date",
+    y =
+      "Penalized SSQ difference"
+  ) +
+  theme_minimal(
+    base_size = 13
+  )
+
+ggsave(
+  filename = file.path(
+    output_folder,
+    "penalized_ssq_difference_by_date.png"
+  ),
+  plot = difference_plot,
+  width = 9,
+  height = 5,
+  dpi = 300
+)
+
+cat(
+  "\nANALYSIS FINISHED.\n"
+)
+
+cat(
+  "Results were saved in:\n",
+  output_folder,
+  "\n"
+)
+
+```
+
+You can add options to executable code like this
+
+```{r}
+#| echo: false
+2 * 2
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
