@@ -1,0 +1,3290 @@
+---
+title: "KArnel KArnel"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+rm(list = ls())
+
+
+# PACKAGES
+
+library(readr)
+library(dplyr)
+library(lubridate)
+library(here)
+library(ggplot2)
+library(reshape2)
+
+
+
+# READ THE THREE REAL-DATA FILES
+
+light_raw <- read_csv(
+  here(
+    "merged_fcb_data_2012",
+    "E_data.csv"
+  ),
+  show_col_types = FALSE
+)
+
+cells_raw <- read_csv(
+  here(
+    "merged_fcb_data_2012",
+    "cells_size_dist_data.csv"
+  ),
+  show_col_types = FALSE
+)
+
+volume_data <- read_csv(
+  here(
+    "merged_fcb_data_2012",
+    "vol_bins.csv"
+  ),
+  show_col_types = FALSE
+)
+
+
+
+# CONVERT DATE-TIME COLUMNS
+
+light_raw <- light_raw |>
+  mutate(
+    date_time = parse_date_time(
+      date_time,
+      orders = c(
+        "ymd HMS",
+        "ymd HM",
+        "ymd"
+      ),
+      tz = "UTC"
+    )
+  )
+
+cells_raw <- cells_raw |>
+  mutate(
+    date_time = parse_date_time(
+      date_time,
+      orders = c(
+        "ymd HMS",
+        "ymd HM",
+        "ymd"
+      ),
+      tz = "UTC"
+    )
+  )
+
+
+
+# IDENTIFY THE 57 SIZE-DISTRIBUTION COLUMNS
+
+size_columns <- grep(
+  "^w[0-9]+$",
+  names(cells_raw),
+  value = TRUE
+)
+
+cat(
+  "\nNUMBER OF SIZE COLUMNS\n"
+)
+
+print(
+  length(size_columns)
+)
+
+if (length(size_columns) != 57) {
+  stop(
+    "The cell data do not contain exactly 57 size columns."
+  )
+}
+
+
+
+# REMOVE ROWS WITHOUT USABLE MEASUREMENTS
+
+light_data <- light_raw |>
+  filter(
+    !is.na(date_time),
+    !is.na(E)
+  )
+
+cell_data <- cells_raw |>
+  filter(
+    !is.na(date_time),
+    !is.na(cells_per_ml),
+    if_all(
+      all_of(size_columns),
+      ~ !is.na(.x)
+    )
+  )
+
+
+
+# VOLUME REPRESENTED BY EACH SIZE CLASS
+
+v_i <- volume_data$v_i
+
+if (length(v_i) != 57) {
+  stop(
+    "The volume file does not contain exactly 57 volume bins."
+  )
+}
+
+
+
+# AVERAGE DUPLICATE LIGHT TIMESTAMPS
+
+light_unique <- light_data |>
+  group_by(date_time) |>
+  summarise(
+    E = mean(
+      E,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) |>
+  arrange(date_time)
+
+
+
+# AVERAGE DUPLICATE CELL TIMESTAMPS
+
+cell_unique <- cell_data |>
+  group_by(date_time) |>
+  summarise(
+    cells_per_ml = mean(
+      cells_per_ml,
+      na.rm = TRUE
+    ),
+    across(
+      all_of(size_columns),
+      ~ mean(
+        .x,
+        na.rm = TRUE
+      )
+    ),
+    .groups = "drop"
+  ) |>
+  arrange(date_time)
+
+
+
+# BASIC DATA CHECKS
+
+cat(
+  "\nRAW LIGHT DATA DIMENSIONS\n"
+)
+
+print(
+  dim(light_raw)
+)
+
+cat(
+  "\nCLEANED UNIQUE LIGHT DATA DIMENSIONS\n"
+)
+
+print(
+  dim(light_unique)
+)
+
+cat(
+  "\nRAW CELL DATA DIMENSIONS\n"
+)
+
+print(
+  dim(cells_raw)
+)
+
+cat(
+  "\nCLEANED UNIQUE CELL DATA DIMENSIONS\n"
+)
+
+print(
+  dim(cell_unique)
+)
+
+cat(
+  "\nLIGHT DATE RANGE\n"
+)
+
+print(
+  range(
+    light_unique$date_time
+  )
+)
+
+cat(
+  "\nCELL DATE RANGE\n"
+)
+
+print(
+  range(
+    cell_unique$date_time
+  )
+)
+
+
+
+# FUNCTION TO CHECK WHETHER A 24-HOUR PERIOD IS COMPLETE
+
+is_clean_period <- function(start_time) {
+  
+  # We need 24 hourly cell observations:
+  # start time through start time + 23 hours
+  
+  expected_cell_times <- seq(
+    from = start_time,
+    by = "1 hour",
+    length.out = 24
+  )
+  
+  actual_cell_times <- cell_unique |>
+    filter(
+      date_time >= start_time,
+      date_time <= start_time + hours(23)
+    ) |>
+    pull(date_time)
+  
+  if (
+    length(actual_cell_times) !=
+    length(expected_cell_times)
+  ) {
+    return(FALSE)
+  }
+  
+  if (
+    !all(
+      as.numeric(actual_cell_times) ==
+      as.numeric(expected_cell_times)
+    )
+  ) {
+    return(FALSE)
+  }
+  
+  
+  # We also need continuous ten-minute light data:
+  # 33 hours before the first observation
+  # through 24 hours after the first observation
+  
+  expected_light_times <- seq(
+    from = start_time - hours(33),
+    to = start_time + hours(24),
+    by = "10 min"
+  )
+  
+  actual_light_times <- light_unique |>
+    filter(
+      date_time >= start_time - hours(33),
+      date_time <= start_time + hours(24)
+    ) |>
+    pull(date_time)
+  
+  if (
+    length(actual_light_times) !=
+    length(expected_light_times)
+  ) {
+    return(FALSE)
+  }
+  
+  if (
+    !all(
+      as.numeric(actual_light_times) ==
+      as.numeric(expected_light_times)
+    )
+  ) {
+    return(FALSE)
+  }
+  
+  return(TRUE)
+}
+
+
+
+# CANDIDATE PERIODS BEGINNING AT 6:00 AM
+
+candidate_starts <- cell_unique |>
+  filter(
+    hour(date_time) == 6,
+    minute(date_time) == 0,
+    second(date_time) == 0
+  ) |>
+  pull(date_time)
+
+
+
+# CHECK EVERY CANDIDATE PERIOD
+
+clean_period_check <- vapply(
+  seq_along(candidate_starts),
+  function(i) {
+    
+    is_clean_period(
+      candidate_starts[i]
+    )
+    
+  },
+  logical(1)
+)
+
+
+
+# SAVE THE CLEAN STARTING TIMES
+
+clean_starts <- candidate_starts[
+  clean_period_check
+]
+
+cat(
+  "\nNUMBER OF CLEAN 24-HOUR PERIODS FOUND\n"
+)
+
+print(
+  length(clean_starts)
+)
+
+cat(
+  "\nFIRST CLEAN STARTING TIMES\n"
+)
+
+print(
+  head(
+    clean_starts,
+    10
+  )
+)
+
+
+
+# STOP IF NO COMPLETE PERIOD WAS FOUND
+
+if (length(clean_starts) == 0) {
+  
+  stop(
+    paste(
+      "No complete 24-hour period was found",
+      "with 33 previous hours of continuous light."
+    )
+  )
+  
+}
+
+
+
+# SELECT THE FIRST COMPLETE PERIOD
+
+test_start <- clean_starts[1]
+
+test_end <- test_start + hours(23)
+
+light_history_start <- test_start - hours(33)
+
+light_period_end <- test_start + hours(24)
+
+
+
+# SELECT CELL OBSERVATIONS
+
+cell_24 <- cell_unique |>
+  filter(
+    date_time >= test_start,
+    date_time <= test_end
+  ) |>
+  arrange(date_time)
+
+
+
+# SELECT LIGHT OBSERVATIONS
+
+light_24 <- light_unique |>
+  filter(
+    date_time >= light_history_start,
+    date_time <= light_period_end
+  ) |>
+  arrange(date_time)
+
+
+
+# CHECK THE SELECTED PERIOD
+
+cat(
+  "\nSELECTED TEST START\n"
+)
+
+print(
+  test_start
+)
+
+cat(
+  "\nSELECTED TEST END\n"
+)
+
+print(
+  test_end
+)
+
+cat(
+  "\nNUMBER OF CELL OBSERVATIONS\n"
+)
+
+print(
+  nrow(cell_24)
+)
+
+cat(
+  "\nNUMBER OF UNIQUE CELL TIMES\n"
+)
+
+print(
+  n_distinct(cell_24$date_time)
+)
+
+cat(
+  "\nCELL TIME DIFFERENCES IN HOURS\n"
+)
+
+print(
+  table(
+    as.numeric(
+      diff(cell_24$date_time),
+      units = "hours"
+    )
+  )
+)
+
+cat(
+  "\nNUMBER OF LIGHT OBSERVATIONS\n"
+)
+
+print(
+  nrow(light_24)
+)
+
+cat(
+  "\nNUMBER OF UNIQUE LIGHT TIMES\n"
+)
+
+print(
+  n_distinct(light_24$date_time)
+)
+
+cat(
+  "\nLIGHT TIME DIFFERENCES IN MINUTES\n"
+)
+
+print(
+  table(
+    as.numeric(
+      diff(light_24$date_time),
+      units = "mins"
+    )
+  )
+)
+
+cat(
+  "\nCELL DATE RANGE\n"
+)
+
+print(
+  range(cell_24$date_time)
+)
+
+cat(
+  "\nLIGHT DATE RANGE\n"
+)
+
+print(
+  range(light_24$date_time)
+)
+
+
+
+# CREATE THE OBSERVED SIZE-DISTRIBUTION MATRIX
+
+W_obs <- as.matrix(
+  cell_24[
+    ,
+    size_columns
+  ]
+)
+
+
+
+# NORMALIZE EACH OBSERVED DISTRIBUTION
+
+W_obs <- W_obs /
+  rowSums(W_obs)
+
+
+
+# MODEL DIMENSIONS
+
+m <- ncol(W_obs)
+
+n_hours <- nrow(W_obs)
+
+
+
+# CHECK THE OBSERVED MATRIX
+
+cat(
+  "\nDIMENSIONS OF W_obs\n"
+)
+
+print(
+  dim(W_obs)
+)
+
+cat(
+  "\nRANGE OF ROW SUMS\n"
+)
+
+print(
+  range(
+    rowSums(W_obs)
+  )
+)
+
+cat(
+  "\nNUMBER OF SIZE CLASSES\n"
+)
+
+print(
+  m
+)
+
+cat(
+  "\nNUMBER OF OBSERVED HOURS\n"
+)
+
+print(
+  n_hours
+)
+
+
+
+# PLOT MEASURED LIGHT FOR THE SELECTED PERIOD
+
+light_plot_data <- light_24 |>
+  mutate(
+    Hours_from_start = as.numeric(
+      difftime(
+        date_time,
+        test_start,
+        units = "hours"
+      )
+    )
+  )
+
+measured_light_plot <- ggplot(
+  light_plot_data,
+  aes(
+    x = Hours_from_start,
+    y = E
+  )
+) +
+  geom_line(
+    linewidth = 0.8
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Measured Light for the Selected Period",
+    subtitle = paste(
+      "Dashed line indicates the first cell observation:",
+      format(
+        test_start,
+        "%Y-%m-%d %H:%M UTC"
+      )
+    ),
+    x = "Hours relative to first cell observation",
+    y = "Measured light E"
+  ) +
+  theme_minimal(
+    base_size = 13
+  )
+
+print(
+  measured_light_plot
+)
+
+
+
+# PREPARE OBSERVED SIZE-DISTRIBUTION DATA FOR HEATMAP
+
+observed_df <- melt(
+  W_obs
+)
+
+colnames(observed_df) <- c(
+  "TimeIndex",
+  "SizeClass",
+  "Proportion"
+)
+
+
+
+# FIRST MATRIX ROW REPRESENTS HOUR ZERO
+
+observed_df$Hour <-
+  observed_df$TimeIndex - 1
+
+
+
+# CONVERT SIZE-CLASS INDEX INTO CELL VOLUME
+
+observed_df$CellVolume <-
+  v_i[
+    observed_df$SizeClass
+  ]
+
+
+
+# OBSERVED REAL-DATA HEATMAP
+
+observed_heatmap <- ggplot(
+  observed_df,
+  aes(
+    x = CellVolume,
+    y = Hour,
+    fill = Proportion
+  )
+) +
+  geom_tile() +
+  scale_x_log10() +
+  scale_y_continuous(
+    breaks = seq(
+      0,
+      n_hours - 1,
+      by = 3
+    )
+  ) +
+  scale_fill_gradientn(
+    colors = c(
+      "blue",
+      "cyan",
+      "yellow",
+      "red"
+    )
+  ) +
+  labs(
+    title = "Observed Synechococcus Size Distribution",
+    subtitle = paste(
+      format(
+        test_start,
+        "%Y-%m-%d %H:%M"
+      ),
+      "to",
+      format(
+        test_end,
+        "%Y-%m-%d %H:%M"
+      ),
+      "UTC"
+    ),
+    x = expression(
+      "Cell volume (" * mu * m^3 * ")"
+    ),
+    y = "Hour after first observation",
+    fill = "Proportion"
+  ) +
+  theme_minimal(
+    base_size = 13
+  ) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(
+      face = "bold"
+    )
+  )
+
+print(
+  observed_heatmap
+)
+
+```
+
+```{r}
+# PREPARE MEASURED LIGHT FOR THE MODEL
+
+
+# Convert date-time into hours relative to the first cell observation
+#
+# test_start corresponds to model time t = 0
+
+light_model <- light_24 |>
+  mutate(
+    model_hour = as.numeric(
+      difftime(
+        date_time,
+        test_start,
+        units = "hours"
+      )
+    )
+  ) |>
+  arrange(model_hour)
+
+
+cat(
+  "\nMODEL LIGHT-TIME RANGE\n"
+)
+
+print(
+  range(light_model$model_hour)
+)
+
+
+cat(
+  "\nMODEL LIGHT-VALUE RANGE\n"
+)
+
+print(
+  range(light_model$E)
+)
+
+
+
+# MEASURED LIGHT FUNCTION E(t)
+#
+# The model uses time in hours.
+# The light measurements occur every 10 minutes.
+# Linear interpolation gives light at any requested model time.
+
+E_t <- function(t) {
+  
+  minimum_time <- min(
+    light_model$model_hour
+  )
+  
+  maximum_time <- max(
+    light_model$model_hour
+  )
+  
+  if (
+    any(t < minimum_time) ||
+    any(t > maximum_time)
+  ) {
+    
+    stop(
+      paste(
+        "The model requested light outside the available range.",
+        "Requested time:",
+        paste(t, collapse = ", ")
+      )
+    )
+  }
+  
+  light_value <- approx(
+    x = light_model$model_hour,
+    y = light_model$E,
+    xout = t,
+    method = "linear",
+    rule = 1
+  )$y
+  
+  # Prevent any small negative interpolated values
+  light_value <- pmax(
+    light_value,
+    0
+  )
+  
+  return(
+    light_value
+  )
+}
+
+
+
+# CHECK MEASURED LIGHT AT SEVERAL MODEL TIMES
+
+cat(
+  "\nMEASURED LIGHT AT MODEL TIME 0\n"
+)
+
+print(
+  E_t(0)
+)
+
+cat(
+  "\nMEASURED LIGHT AT MODEL TIME 1 HOUR\n"
+)
+
+print(
+  E_t(1)
+)
+
+cat(
+  "\nMEASURED LIGHT AT MODEL TIME -1 HOUR\n"
+)
+
+print(
+  E_t(-1)
+)
+
+
+
+# GEOMETRIC KERNEL WEIGHTS
+
+kernel_weights <- function(
+    p,
+    tau_max
+) {
+  
+  if (
+    p <= 0 ||
+    p >= 1
+  ) {
+    
+    stop(
+      "p must be strictly between 0 and 1."
+    )
+  }
+  
+  tau_values <- 0:tau_max
+  
+  weights <- p *
+    (1 - p)^tau_values
+  
+  weights <- weights /
+    sum(weights)
+  
+  return(
+    weights
+  )
+}
+
+
+
+# EFFECTIVE KERNEL-WEIGHTED LIGHT
+
+E_kernel <- function(
+    t,
+    p,
+    tau_max
+) {
+  
+  tau_values <- 0:tau_max
+  
+  weights <- kernel_weights(
+    p = p,
+    tau_max = tau_max
+  )
+  
+  past_light <- sapply(
+    tau_values,
+    function(tau) {
+      
+      E_t(
+        t - tau
+      )
+      
+    }
+  )
+  
+  effective_light <- sum(
+    weights *
+      past_light
+  )
+  
+  return(
+    effective_light
+  )
+}
+
+
+
+# TEST VALUES FOR THE KERNEL
+
+p_test <- 0.90
+
+tau_max_test <- 33
+
+
+cat(
+  "\nSUM OF KERNEL WEIGHTS\n"
+)
+
+print(
+  sum(
+    kernel_weights(
+      p = p_test,
+      tau_max = tau_max_test
+    )
+  )
+)
+
+
+cat(
+  "\nINSTANTANEOUS LIGHT AT t = 0\n"
+)
+
+print(
+  E_t(0)
+)
+
+
+cat(
+  "\nKERNEL EFFECTIVE LIGHT AT t = 0\n"
+)
+
+print(
+  E_kernel(
+    t = 0,
+    p = p_test,
+    tau_max = tau_max_test
+  )
+)
+
+
+
+# CREATE A TEN-MINUTE MODEL-TIME GRID
+
+model_time_grid <- seq(
+  from = 0,
+  to = 23,
+  by = 1 / 6
+)
+
+
+
+# INSTANTANEOUS MEASURED LIGHT
+
+instantaneous_light <- sapply(
+  model_time_grid,
+  E_t
+)
+
+
+
+# KERNEL-WEIGHTED LIGHT
+
+effective_light <- sapply(
+  model_time_grid,
+  function(t) {
+    
+    E_kernel(
+      t = t,
+      p = p_test,
+      tau_max = tau_max_test
+    )
+    
+  }
+)
+
+
+
+# DATA FRAME FOR PLOTTING
+
+light_comparison <- data.frame(
+  ModelHour = model_time_grid,
+  Instantaneous = instantaneous_light,
+  Kernel = effective_light
+)
+
+
+
+# CONVERT TO LONG FORMAT
+
+light_comparison_long <- melt(
+  light_comparison,
+  id.vars = "ModelHour",
+  variable.name = "LightType",
+  value.name = "Light"
+)
+
+
+
+# PLOT INSTANTANEOUS AND KERNEL-WEIGHTED LIGHT
+
+light_comparison_plot <- ggplot(
+  light_comparison_long,
+  aes(
+    x = ModelHour,
+    y = Light,
+    linetype = LightType
+  )
+) +
+  geom_line(
+    linewidth = 1
+  ) +
+  labs(
+    title = "Measured and Kernel-Weighted Light",
+    subtitle = paste0(
+      "p = ",
+      p_test,
+      ", tau_max = ",
+      tau_max_test,
+      " hours"
+    ),
+    x = "Hour after first cell observation",
+    y = "Light",
+    linetype = "Light calculation"
+  ) +
+  theme_minimal(
+    base_size = 13
+  )
+
+print(
+  light_comparison_plot
+)
+
+```
+
+```{r}
+
+cat("Chunk 3 started\n")
+
+cat("E_t exists:", exists("E_t"), "\n")
+cat("E_kernel exists:", exists("E_kernel"), "\n")
+cat("W_obs exists:", exists("W_obs"), "\n")
+cat("m exists:", exists("m"), "\n")
+cat("n_hours exists:", exists("n_hours"), "\n")
+cat("v_i exists:", exists("v_i"), "\n")
+
+
+# CHUNK 3
+# CONNECT THE REAL DATA TO THE SIZE-STRUCTURED MODEL
+
+
+# GROWTH FUNCTION
+#
+# model_type can be:
+# "instantaneous" = current measured light only
+# "kernel"        = current and previous measured light
+
+gamma_t <- function(
+    t,
+    gamma_max,
+    E_star,
+    model_type = "kernel",
+    p = NULL,
+    tau_max = NULL
+) {
+  
+  if (model_type == "instantaneous") {
+    
+    effective_light <- E_t(t)
+    
+  } else if (model_type == "kernel") {
+    
+    effective_light <- E_kernel(
+      t = t,
+      p = p,
+      tau_max = tau_max
+    )
+    
+  } else {
+    
+    stop(
+      "model_type must be either 'instantaneous' or 'kernel'."
+    )
+  }
+  
+  gamma <- gamma_max *
+    (
+      1 -
+        exp(
+          -effective_light / E_star
+        )
+    )
+  
+  return(gamma)
+}
+
+
+
+# SIZE-DEPENDENT DIVISION FUNCTION
+#
+# Division is allowed throughout the full 24-hour period.
+# There is no t < 6 restriction.
+
+delta_i_t <- function(
+    t,
+    delta_max,
+    a,
+    b
+) {
+  
+  delta_i <- delta_max *
+    (
+      (a * v_i)^b /
+        (
+          1 +
+            (a * v_i)^b
+        )
+    )
+  
+  return(delta_i)
+}
+
+
+
+# TEN-MINUTE PROJECTION MATRIX A(t)
+
+matrix_A <- function(
+    t,
+    gamma_max,
+    delta_max,
+    E_star,
+    a,
+    b,
+    model_type = "kernel",
+    p = NULL,
+    tau_max = NULL
+) {
+  
+  A <- matrix(
+    0,
+    nrow = m,
+    ncol = m
+  )
+  
+  
+  # Growth using measured light
+  
+  gamma <- gamma_t(
+    t = t,
+    gamma_max = gamma_max,
+    E_star = E_star,
+    model_type = model_type,
+    p = p,
+    tau_max = tau_max
+  )
+  
+  
+  # Size-dependent division
+  
+  delta_i <- delta_i_t(
+    t = t,
+    delta_max = delta_max,
+    a = a,
+    b = b
+  )
+  
+  
+  # Number of size classes corresponding
+  # approximately to a doubling in volume
+  
+  delta_v <- 0.125
+  
+  j <- as.integer(
+    1 +
+      1 / delta_v
+  )
+  
+  
+  
+  # GROWTH
+  #
+  # Cells move into the next larger size class.
+  
+  for (i in 1:(m - 1)) {
+    
+    A[i + 1, i] <-
+      A[i + 1, i] +
+      gamma *
+      (
+        1 -
+          delta_i[i]
+      )
+  }
+  
+  
+  # Growing cells in the largest class
+  # remain in the largest class.
+  
+  A[m, m] <-
+    A[m, m] +
+    gamma *
+    (
+      1 -
+        delta_i[m]
+    )
+  
+  
+  
+  # DIVISION
+  #
+  # Small dividing cells produce daughters
+  # in the first size class.
+  
+  for (i in 2:(j - 1)) {
+    
+    A[1, i] <-
+      A[1, i] +
+      2 *
+      delta_i[i]
+  }
+  
+  
+  # Larger cells produce daughters approximately
+  # one-half of the parent's volume.
+  
+  for (i in j:m) {
+    
+    smaller_class <- i + 1 - j
+    
+    A[smaller_class, i] <-
+      A[smaller_class, i] +
+      2 *
+      delta_i[i]
+  }
+  
+  
+  
+  # STASIS
+  #
+  # Cells that neither grow nor divide
+  # remain in the same size class.
+  
+  A[1, 1] <-
+    A[1, 1] +
+    (
+      (
+        1 -
+          gamma
+      ) *
+        (
+          1 -
+            delta_i[1]
+        )
+    ) +
+    2 *
+    delta_i[1]
+  
+  
+  for (i in 2:(m - 1)) {
+    
+    A[i, i] <-
+      A[i, i] +
+      (
+        1 -
+          gamma
+      ) *
+      (
+        1 -
+          delta_i[i]
+      )
+  }
+  
+  
+  A[m, m] <-
+    A[m, m] +
+    (
+      1 -
+        gamma
+    ) *
+    (
+      1 -
+        delta_i[m]
+    )
+  
+  
+  return(A)
+}
+
+
+
+# ONE-HOUR PROJECTION MATRIX B(t)
+#
+# Each hour contains six ten-minute steps.
+
+matrix_B <- function(
+    t,
+    gamma_max,
+    delta_max,
+    E_star,
+    a,
+    b,
+    model_type = "kernel",
+    p = NULL,
+    tau_max = NULL,
+    dt = 1 / 6
+) {
+  
+  B <- diag(m)
+  
+  n_steps <- as.integer(
+    round(
+      1 / dt
+    )
+  )
+  
+  for (k in 0:(n_steps - 1)) {
+    
+    time_now <- t +
+      k *
+      dt
+    
+    A_k <- matrix_A(
+      t = time_now,
+      gamma_max = gamma_max,
+      delta_max = delta_max,
+      E_star = E_star,
+      a = a,
+      b = b,
+      model_type = model_type,
+      p = p,
+      tau_max = tau_max
+    )
+    
+    B <- A_k %*% B
+  }
+  
+  return(B)
+}
+
+
+
+# PROJECT THE MODEL FORWARD
+#
+# The first observed distribution is used
+# as the initial condition.
+
+predict_size_distribution <- function(
+    params,
+    model_type = "kernel",
+    tau_max = 33
+) {
+  
+  gamma_max <- params["gamma_max"]
+  delta_max <- params["delta_max"]
+  E_star <- params["E_star"]
+  a <- params["a"]
+  b <- params["b"]
+  
+  
+  if (model_type == "kernel") {
+    
+    p <- params["p"]
+    
+  } else {
+    
+    p <- NULL
+  }
+  
+  
+  W_pred <- matrix(
+    0,
+    nrow = n_hours,
+    ncol = m
+  )
+  
+  
+  # Initial condition comes from the real data.
+  
+  W_pred[1, ] <- W_obs[1, ]
+  
+  
+  # Predict the following 23 hourly distributions.
+  
+  for (row in 1:(n_hours - 1)) {
+    
+    time_start <- row - 1
+    
+    B_t <- matrix_B(
+      t = time_start,
+      gamma_max = gamma_max,
+      delta_max = delta_max,
+      E_star = E_star,
+      a = a,
+      b = b,
+      model_type = model_type,
+      p = p,
+      tau_max = tau_max
+    )
+    
+    W_pred[row + 1, ] <-
+      B_t %*%
+      W_pred[row, ]
+    
+    
+    # Normalize to a size distribution.
+    
+    total_predicted <- sum(
+      W_pred[row + 1, ]
+    )
+    
+    if (
+      !is.finite(total_predicted) ||
+      total_predicted <= 0
+    ) {
+      
+      stop(
+        paste(
+          "Invalid projected distribution",
+          "at model row",
+          row + 1
+        )
+      )
+    }
+    
+    W_pred[row + 1, ] <-
+      W_pred[row + 1, ] /
+      total_predicted
+  }
+  
+  
+  return(W_pred)
+}
+
+
+
+# STARTING PARAMETER VALUES
+#
+# These are test values only.
+# They have not yet been fitted to the real data.
+
+starting_kernel_params <- c(
+  gamma_max = 0.20,
+  delta_max = 0.03,
+  E_star = 500,
+  a = 2,
+  b = 2,
+  p = 0.90
+)
+
+
+
+# GENERATE AN INITIAL KERNEL MODEL PROJECTION
+
+W_kernel_start <- predict_size_distribution(
+  params = starting_kernel_params,
+  model_type = "kernel",
+  tau_max = 33
+)
+
+
+
+# CHECK THE PROJECTED MATRIX
+
+cat(
+  "\nDIMENSIONS OF INITIAL KERNEL PROJECTION\n"
+)
+
+print(
+  dim(W_kernel_start)
+)
+
+
+cat(
+  "\nRANGE OF PROJECTED ROW SUMS\n"
+)
+
+print(
+  range(
+    rowSums(W_kernel_start)
+  )
+)
+
+
+cat(
+  "\nRANGE OF PROJECTED PROPORTIONS\n"
+)
+
+print(
+  range(W_kernel_start)
+)
+
+
+
+# INITIAL SUM OF SQUARED ERRORS
+#
+# The first row is excluded because it is used
+# as the initial condition.
+
+initial_kernel_sse <- sum(
+  (
+    W_obs[-1, ] -
+      W_kernel_start[-1, ]
+  )^2
+)
+
+
+cat(
+  "\nINITIAL KERNEL SSE\n"
+)
+
+print(
+  initial_kernel_sse
+)
+
+
+
+# PREPARE THE PROJECTED DISTRIBUTION FOR A HEATMAP
+
+kernel_start_df <- melt(
+  W_kernel_start
+)
+
+colnames(kernel_start_df) <- c(
+  "TimeIndex",
+  "SizeClass",
+  "Proportion"
+)
+
+kernel_start_df$Hour <-
+  kernel_start_df$TimeIndex - 1
+
+kernel_start_df$CellVolume <-
+  v_i[
+    kernel_start_df$SizeClass
+  ]
+
+
+
+# USE THE SAME COLOR SCALE FOR OBSERVED
+# AND INITIAL MODEL HEATMAPS
+
+common_max_initial <- max(
+  W_obs,
+  W_kernel_start
+)
+
+
+
+# OBSERVED HEATMAP WITH COMMON COLOR SCALE
+
+observed_heatmap_common <- ggplot(
+  observed_df,
+  aes(
+    x = CellVolume,
+    y = Hour,
+    fill = Proportion
+  )
+) +
+  geom_tile() +
+  scale_x_log10() +
+  scale_y_continuous(
+    breaks = seq(
+      0,
+      n_hours - 1,
+      by = 3
+    )
+  ) +
+  scale_fill_gradientn(
+    colors = c(
+      "blue",
+      "cyan",
+      "yellow",
+      "red"
+    ),
+    limits = c(
+      0,
+      common_max_initial
+    )
+  ) +
+  labs(
+    title = "Observed Size Distribution",
+    subtitle = format(
+      test_start,
+      "%Y-%m-%d"
+    ),
+    x = expression(
+      "Cell volume (" * mu * m^3 * ")"
+    ),
+    y = "Hour after first observation",
+    fill = "Proportion"
+  ) +
+  theme_minimal(
+    base_size = 13
+  ) +
+  theme(
+    panel.grid = element_blank()
+  )
+
+
+
+# INITIAL KERNEL MODEL HEATMAP
+
+kernel_start_heatmap <- ggplot(
+  kernel_start_df,
+  aes(
+    x = CellVolume,
+    y = Hour,
+    fill = Proportion
+  )
+) +
+  geom_tile() +
+  scale_x_log10() +
+  scale_y_continuous(
+    breaks = seq(
+      0,
+      n_hours - 1,
+      by = 3
+    )
+  ) +
+  scale_fill_gradientn(
+    colors = c(
+      "blue",
+      "cyan",
+      "yellow",
+      "red"
+    ),
+    limits = c(
+      0,
+      common_max_initial
+    )
+  ) +
+  labs(
+    title = "Initial Kernel Model Projection",
+    subtitle = paste0(
+      "Starting values: p = ",
+      starting_kernel_params["p"],
+      ", tau_max = 33"
+    ),
+    x = expression(
+      "Cell volume (" * mu * m^3 * ")"
+    ),
+    y = "Hour after first observation",
+    fill = "Proportion"
+  ) +
+  theme_minimal(
+    base_size = 13
+  ) +
+  theme(
+    panel.grid = element_blank()
+  )
+
+
+
+# DISPLAY BOTH HEATMAPS
+
+print(
+  observed_heatmap_common
+)
+
+print(
+  kernel_start_heatmap
+)
+```
+
+```{r}
+# CHUNK 4
+# FIT THE KERNEL MODEL TO THE REAL DATA
+
+
+# FIX THE MAXIMUM MEMORY LENGTH FOR THIS FIT
+
+tau_max_fit <- 33
+
+
+
+# OBJECTIVE FUNCTION
+#
+# For each candidate parameter combination:
+# 1. project the model forward,
+# 2. compare it with the observed size distributions,
+# 3. return the sum of squared errors.
+
+kernel_objective <- function(
+    params,
+    W_observed,
+    tau_max
+) {
+  
+  names(params) <- c(
+    "gamma_max",
+    "delta_max",
+    "E_star",
+    "a",
+    "b",
+    "p"
+  )
+  
+  
+  # Reject invalid parameter values
+  
+  if (
+    params["gamma_max"] <= 0 ||
+    params["gamma_max"] > 0.5 ||
+    params["delta_max"] <= 0 ||
+    params["delta_max"] > 0.15 ||
+    params["E_star"] <= 0 ||
+    params["a"] <= 0 ||
+    params["b"] <= 0 ||
+    params["p"] <= 0 ||
+    params["p"] >= 1
+  ) {
+    
+    return(1e10)
+  }
+  
+  
+  # Try the model projection.
+  # If a numerical error occurs, return a large penalty.
+  
+  W_predicted <- tryCatch(
+    
+    predict_size_distribution(
+      params = params,
+      model_type = "kernel",
+      tau_max = tau_max
+    ),
+    
+    error = function(e) {
+      return(NULL)
+    }
+    
+  )
+  
+  
+  if (is.null(W_predicted)) {
+    return(1e10)
+  }
+  
+  
+  if (
+    any(!is.finite(W_predicted))
+  ) {
+    return(1e10)
+  }
+  
+  
+  # Exclude row 1 because it is used
+  # as the initial condition.
+  
+  sse <- sum(
+    (
+      W_observed[-1, ] -
+        W_predicted[-1, ]
+    )^2
+  )
+  
+  
+  if (!is.finite(sse)) {
+    return(1e10)
+  }
+  
+  
+  return(sse)
+}
+
+
+
+# STARTING VALUES
+
+initial_kernel_guess <- c(
+  gamma_max = 0.20,
+  delta_max = 0.03,
+  E_star = 500,
+  a = 2,
+  b = 2,
+  p = 0.90
+)
+
+
+
+# CHECK THE OBJECTIVE BEFORE OPTIMIZATION
+
+starting_kernel_sse <- kernel_objective(
+  params = initial_kernel_guess,
+  W_observed = W_obs,
+  tau_max = tau_max_fit
+)
+
+cat(
+  "\nKERNEL SSE AT STARTING VALUES\n"
+)
+
+print(
+  starting_kernel_sse
+)
+
+
+
+# FIT THE SIX PARAMETERS
+
+kernel_fit <- optim(
+  par = initial_kernel_guess,
+  fn = kernel_objective,
+  
+  W_observed = W_obs,
+  tau_max = tau_max_fit,
+  
+  method = "L-BFGS-B",
+  
+  lower = c(
+    gamma_max = 0.001,
+    delta_max = 0.001,
+    E_star = 10,
+    a = 0.1,
+    b = 0.1,
+    p = 0.001
+  ),
+  
+  upper = c(
+    gamma_max = 0.5,
+    delta_max = 0.15,
+    E_star = 5000,
+    a = 30,
+    b = 10,
+    p = 0.999
+  ),
+  
+  control = list(
+    maxit = 1000,
+    
+    parscale = c(
+      gamma_max = 0.20,
+      delta_max = 0.03,
+      E_star = 500,
+      a = 2,
+      b = 2,
+      p = 0.50
+    )
+  )
+)
+
+
+
+# SAVE ESTIMATED PARAMETERS
+
+estimated_kernel_params <- kernel_fit$par
+
+
+
+# PARAMETER RESULTS TABLE
+
+kernel_parameter_results <- data.frame(
+  
+  Parameter = c(
+    "gamma_max",
+    "delta_max",
+    "E_star",
+    "a",
+    "b",
+    "p"
+  ),
+  
+  Starting_Value = initial_kernel_guess,
+  
+  Estimated_Value = estimated_kernel_params
+)
+
+
+print(
+  kernel_parameter_results
+)
+
+
+
+# OPTIMIZATION INFORMATION
+
+cat(
+  "\nKERNEL OPTIMIZATION CONVERGENCE\n"
+)
+
+print(
+  kernel_fit$convergence
+)
+
+
+cat(
+  "\nKERNEL OPTIMIZATION MESSAGE\n"
+)
+
+print(
+  kernel_fit$message
+)
+
+
+cat(
+  "\nFINAL KERNEL SSE\n"
+)
+
+print(
+  kernel_fit$value
+)
+
+
+cat(
+  "\nSSE IMPROVEMENT\n"
+)
+
+print(
+  starting_kernel_sse -
+    kernel_fit$value
+)
+
+
+
+# CREATE FITTED KERNEL DISTRIBUTION
+
+W_kernel_fit <- predict_size_distribution(
+  params = estimated_kernel_params,
+  model_type = "kernel",
+  tau_max = tau_max_fit
+)
+
+
+
+# CHECK FITTED MATRIX
+
+cat(
+  "\nDIMENSIONS OF FITTED KERNEL DISTRIBUTION\n"
+)
+
+print(
+  dim(W_kernel_fit)
+)
+
+
+cat(
+  "\nRANGE OF FITTED ROW SUMS\n"
+)
+
+print(
+  range(
+    rowSums(W_kernel_fit)
+  )
+)
+
+
+
+# PENALIZED SUM OF SQUARES
+#
+# There are 23 predicted times because the first
+# observation is used as the initial condition.
+#
+# Each distribution contains 57 proportions,
+# but only 56 are independent because they sum to 1.
+
+n_independent <- (
+  nrow(W_obs) - 1
+) * (
+  ncol(W_obs) - 1
+)
+
+
+k_kernel <- 6
+
+
+kernel_penalized_ssq <-
+  kernel_fit$value /
+  (
+    n_independent -
+      2 * k_kernel
+  )
+
+
+cat(
+  "\nNUMBER OF INDEPENDENT DATA VALUES\n"
+)
+
+print(
+  n_independent
+)
+
+
+cat(
+  "\nNUMBER OF FITTED KERNEL PARAMETERS\n"
+)
+
+print(
+  k_kernel
+)
+
+
+cat(
+  "\nKERNEL PENALIZED SSQ\n"
+)
+
+print(
+  kernel_penalized_ssq
+)
+
+
+
+# PREPARE FITTED MODEL FOR HEATMAP
+
+kernel_fit_df <- melt(
+  W_kernel_fit
+)
+
+colnames(kernel_fit_df) <- c(
+  "TimeIndex",
+  "SizeClass",
+  "Proportion"
+)
+
+kernel_fit_df$Hour <-
+  kernel_fit_df$TimeIndex - 1
+
+kernel_fit_df$CellVolume <-
+  v_i[
+    kernel_fit_df$SizeClass
+  ]
+
+
+
+# SAME COLOR SCALE FOR OBSERVED AND FITTED DATA
+
+common_max_fit <- max(
+  W_obs,
+  W_kernel_fit
+)
+
+
+
+# OBSERVED HEATMAP WITH COMMON SCALE
+
+observed_heatmap_fitted_scale <- ggplot(
+  observed_df,
+  aes(
+    x = CellVolume,
+    y = Hour,
+    fill = Proportion
+  )
+) +
+  geom_tile() +
+  scale_x_log10() +
+  scale_y_continuous(
+    breaks = seq(
+      0,
+      n_hours - 1,
+      by = 3
+    )
+  ) +
+  scale_fill_gradientn(
+    colors = c(
+      "blue",
+      "cyan",
+      "yellow",
+      "red"
+    ),
+    limits = c(
+      0,
+      common_max_fit
+    )
+  ) +
+  labs(
+    title = "Observed Size Distribution",
+    subtitle = format(
+      test_start,
+      "%Y-%m-%d"
+    ),
+    x = expression(
+      "Cell volume (" * mu * m^3 * ")"
+    ),
+    y = "Hour after first observation",
+    fill = "Proportion"
+  ) +
+  theme_minimal(
+    base_size = 13
+  ) +
+  theme(
+    panel.grid = element_blank()
+  )
+
+
+
+# FITTED KERNEL HEATMAP
+
+fitted_kernel_heatmap <- ggplot(
+  kernel_fit_df,
+  aes(
+    x = CellVolume,
+    y = Hour,
+    fill = Proportion
+  )
+) +
+  geom_tile() +
+  scale_x_log10() +
+  scale_y_continuous(
+    breaks = seq(
+      0,
+      n_hours - 1,
+      by = 3
+    )
+  ) +
+  scale_fill_gradientn(
+    colors = c(
+      "blue",
+      "cyan",
+      "yellow",
+      "red"
+    ),
+    limits = c(
+      0,
+      common_max_fit
+    )
+  ) +
+  labs(
+    title = "Fitted Kernel Model Distribution",
+    
+    subtitle = paste0(
+      "p = ",
+      round(
+        estimated_kernel_params["p"],
+        3
+      ),
+      ", tau_max = ",
+      tau_max_fit
+    ),
+    
+    x = expression(
+      "Cell volume (" * mu * m^3 * ")"
+    ),
+    
+    y = "Hour after first observation",
+    
+    fill = "Proportion"
+  ) +
+  theme_minimal(
+    base_size = 13
+  ) +
+  theme(
+    panel.grid = element_blank()
+  )
+
+
+
+# DISPLAY OBSERVED AND FITTED HEATMAPS
+
+print(
+  observed_heatmap_fitted_scale
+)
+
+print(
+  fitted_kernel_heatmap
+)
+
+
+```
+
+```{r}
+# CHUNK 5
+# FIT THE INSTANTANEOUS-LIGHT MODEL
+# AND COMPARE IT WITH THE KERNEL MODEL
+
+
+# OBJECTIVE FUNCTION FOR THE INSTANTANEOUS MODEL
+
+instantaneous_objective <- function(
+    params,
+    W_observed
+) {
+  
+  names(params) <- c(
+    "gamma_max",
+    "delta_max",
+    "E_star",
+    "a",
+    "b"
+  )
+  
+  
+  # Reject invalid values
+  
+  if (
+    params["gamma_max"] <= 0 ||
+    params["gamma_max"] > 0.5 ||
+    params["delta_max"] <= 0 ||
+    params["delta_max"] > 0.15 ||
+    params["E_star"] <= 0 ||
+    params["a"] <= 0 ||
+    params["b"] <= 0
+  ) {
+    
+    return(1e10)
+  }
+  
+  
+  # Try projecting the model
+  
+  W_predicted <- tryCatch(
+    
+    predict_size_distribution(
+      params = params,
+      model_type = "instantaneous"
+    ),
+    
+    error = function(e) {
+      return(NULL)
+    }
+    
+  )
+  
+  
+  if (is.null(W_predicted)) {
+    return(1e10)
+  }
+  
+  
+  if (any(!is.finite(W_predicted))) {
+    return(1e10)
+  }
+  
+  
+  # First row is excluded because it is
+  # used as the initial condition
+  
+  sse <- sum(
+    (
+      W_observed[-1, ] -
+        W_predicted[-1, ]
+    )^2
+  )
+  
+  
+  if (!is.finite(sse)) {
+    return(1e10)
+  }
+  
+  
+  return(sse)
+}
+
+
+
+# STARTING VALUES
+
+initial_instantaneous_guess <- c(
+  gamma_max = 0.20,
+  delta_max = 0.03,
+  E_star = 500,
+  a = 2,
+  b = 2
+)
+
+
+
+# SSE BEFORE FITTING
+
+starting_instantaneous_sse <- instantaneous_objective(
+  params = initial_instantaneous_guess,
+  W_observed = W_obs
+)
+
+
+cat(
+  "\nINSTANTANEOUS SSE AT STARTING VALUES\n"
+)
+
+print(
+  starting_instantaneous_sse
+)
+
+
+
+# FIT THE FIVE PARAMETERS
+
+instantaneous_fit <- optim(
+  par = initial_instantaneous_guess,
+  fn = instantaneous_objective,
+  
+  W_observed = W_obs,
+  
+  method = "L-BFGS-B",
+  
+  lower = c(
+    gamma_max = 0.001,
+    delta_max = 0.001,
+    E_star = 10,
+    a = 0.1,
+    b = 0.1
+  ),
+  
+  upper = c(
+    gamma_max = 0.5,
+    delta_max = 0.15,
+    E_star = 5000,
+    a = 30,
+    b = 10
+  ),
+  
+  control = list(
+    maxit = 1000,
+    
+    parscale = c(
+      gamma_max = 0.20,
+      delta_max = 0.03,
+      E_star = 500,
+      a = 2,
+      b = 2
+    )
+  )
+)
+
+
+
+# SAVE ESTIMATED PARAMETERS
+
+estimated_instantaneous_params <-
+  instantaneous_fit$par
+
+
+
+# PARAMETER TABLE
+
+instantaneous_parameter_results <- data.frame(
+  
+  Parameter = c(
+    "gamma_max",
+    "delta_max",
+    "E_star",
+    "a",
+    "b"
+  ),
+  
+  Starting_Value =
+    initial_instantaneous_guess,
+  
+  Estimated_Value =
+    estimated_instantaneous_params
+)
+
+
+print(
+  instantaneous_parameter_results
+)
+
+
+
+# OPTIMIZATION RESULTS
+
+cat(
+  "\nINSTANTANEOUS OPTIMIZATION CONVERGENCE\n"
+)
+
+print(
+  instantaneous_fit$convergence
+)
+
+
+cat(
+  "\nINSTANTANEOUS OPTIMIZATION MESSAGE\n"
+)
+
+print(
+  instantaneous_fit$message
+)
+
+
+cat(
+  "\nFINAL INSTANTANEOUS SSE\n"
+)
+
+print(
+  instantaneous_fit$value
+)
+
+
+cat(
+  "\nINSTANTANEOUS SSE IMPROVEMENT\n"
+)
+
+print(
+  starting_instantaneous_sse -
+    instantaneous_fit$value
+)
+
+
+
+# CREATE FITTED INSTANTANEOUS DISTRIBUTION
+
+W_instantaneous_fit <- predict_size_distribution(
+  params = estimated_instantaneous_params,
+  model_type = "instantaneous"
+)
+
+
+
+# CHECK THE FITTED MATRIX
+
+cat(
+  "\nDIMENSIONS OF FITTED INSTANTANEOUS DISTRIBUTION\n"
+)
+
+print(
+  dim(W_instantaneous_fit)
+)
+
+
+cat(
+  "\nRANGE OF FITTED ROW SUMS\n"
+)
+
+print(
+  range(
+    rowSums(W_instantaneous_fit)
+  )
+)
+
+
+
+# PENALIZED SSQ FOR THE INSTANTANEOUS MODEL
+
+k_instantaneous <- 5
+
+
+instantaneous_penalized_ssq <-
+  instantaneous_fit$value /
+  (
+    n_independent -
+      2 * k_instantaneous
+  )
+
+
+cat(
+  "\nNUMBER OF FITTED INSTANTANEOUS PARAMETERS\n"
+)
+
+print(
+  k_instantaneous
+)
+
+
+cat(
+  "\nINSTANTANEOUS PENALIZED SSQ\n"
+)
+
+print(
+  instantaneous_penalized_ssq
+)
+
+
+
+# MODEL-COMPARISON TABLE
+
+model_comparison <- data.frame(
+  
+  Model = c(
+    "Instantaneous light",
+    "Kernel light history"
+  ),
+  
+  tau_max = c(
+    NA,
+    tau_max_fit
+  ),
+  
+  Parameters = c(
+    k_instantaneous,
+    k_kernel
+  ),
+  
+  SSE = c(
+    instantaneous_fit$value,
+    kernel_fit$value
+  ),
+  
+  Penalized_SSQ = c(
+    instantaneous_penalized_ssq,
+    kernel_penalized_ssq
+  )
+)
+
+
+
+# SMALLER PENALIZED SSQ IS BETTER
+
+model_comparison <- model_comparison |>
+  arrange(
+    Penalized_SSQ
+  )
+
+
+cat(
+  "\nMODEL COMPARISON\n"
+)
+
+print(
+  model_comparison
+)
+
+
+cat(
+  "\nPREFERRED MODEL\n"
+)
+
+print(
+  model_comparison$Model[1]
+)
+
+
+
+# PREPARE FITTED INSTANTANEOUS MODEL
+# FOR A HEATMAP
+
+instantaneous_fit_df <- melt(
+  W_instantaneous_fit
+)
+
+colnames(instantaneous_fit_df) <- c(
+  "TimeIndex",
+  "SizeClass",
+  "Proportion"
+)
+
+instantaneous_fit_df$Hour <-
+  instantaneous_fit_df$TimeIndex - 1
+
+instantaneous_fit_df$CellVolume <-
+  v_i[
+    instantaneous_fit_df$SizeClass
+  ]
+
+
+
+# SAME COLOR SCALE FOR ALL THREE HEATMAPS
+
+common_max_models <- max(
+  W_obs,
+  W_kernel_fit,
+  W_instantaneous_fit
+)
+
+
+
+# FITTED INSTANTANEOUS HEATMAP
+
+fitted_instantaneous_heatmap <- ggplot(
+  instantaneous_fit_df,
+  aes(
+    x = CellVolume,
+    y = Hour,
+    fill = Proportion
+  )
+) +
+  geom_tile() +
+  scale_x_log10() +
+  scale_y_continuous(
+    breaks = seq(
+      0,
+      n_hours - 1,
+      by = 3
+    )
+  ) +
+  scale_fill_gradientn(
+    colors = c(
+      "blue",
+      "cyan",
+      "yellow",
+      "red"
+    ),
+    limits = c(
+      0,
+      common_max_models
+    )
+  ) +
+  labs(
+    title = "Fitted Instantaneous-Light Model",
+    subtitle = format(
+      test_start,
+      "%Y-%m-%d"
+    ),
+    x = expression(
+      "Cell volume (" * mu * m^3 * ")"
+    ),
+    y = "Hour after first observation",
+    fill = "Proportion"
+  ) +
+  theme_minimal(
+    base_size = 13
+  ) +
+  theme(
+    panel.grid = element_blank()
+  )
+
+
+print(
+  fitted_instantaneous_heatmap
+)
+
+
+```
+
+```{r}
+# CHUNK 6 — CORRECTED
+# COMPARE DIFFERENT VALUES OF tau_max
+
+
+tau_candidates <- c(
+  1,
+  3,
+  6,
+  12,
+  24,
+  33
+)
+
+
+kernel_parameter_names <- c(
+  "gamma_max",
+  "delta_max",
+  "E_star",
+  "a",
+  "b",
+  "p"
+)
+
+
+kernel_start <- c(
+  gamma_max = 0.20,
+  delta_max = 0.03,
+  E_star = 500,
+  a = 2,
+  b = 2,
+  p = 0.90
+)
+
+
+kernel_lower <- c(
+  gamma_max = 0.001,
+  delta_max = 0.001,
+  E_star = 10,
+  a = 0.1,
+  b = 0.1,
+  p = 0.001
+)
+
+
+kernel_upper <- c(
+  gamma_max = 0.5,
+  delta_max = 0.15,
+  E_star = 5000,
+  a = 30,
+  b = 10,
+  p = 0.999
+)
+
+
+
+# OBJECTIVE FUNCTION FOR ONE FIXED tau_max
+#
+# This version does not hide errors during debugging.
+
+kernel_objective_tau <- function(
+    x,
+    tau_value
+) {
+  
+  params <- setNames(
+    as.numeric(x),
+    kernel_parameter_names
+  )
+  
+  W_pred <- predict_size_distribution(
+    params = params,
+    model_type = "kernel",
+    tau_max = tau_value
+  )
+  
+  sse <- sum(
+    (
+      W_obs[-1, ] -
+        W_pred[-1, ]
+    )^2
+  )
+  
+  if (!is.finite(sse)) {
+    stop(
+      paste(
+        "Non-finite SSE for tau_max =",
+        tau_value
+      )
+    )
+  }
+  
+  return(sse)
+}
+
+
+
+# FIRST TEST EVERY tau_max AT THE STARTING VALUES
+
+cat(
+  "\nSSE CHECK AT STARTING VALUES\n"
+)
+
+starting_tau_checks <- sapply(
+  tau_candidates,
+  function(tau_value) {
+    
+    result <- tryCatch(
+      
+      kernel_objective_tau(
+        x = kernel_start,
+        tau_value = tau_value
+      ),
+      
+      error = function(e) {
+        
+        cat(
+          "\nERROR FOR tau_max =",
+          tau_value,
+          "\n"
+        )
+        
+        cat(
+          conditionMessage(e),
+          "\n"
+        )
+        
+        return(NA_real_)
+      }
+    )
+    
+    return(result)
+  }
+)
+
+
+starting_check_table <- data.frame(
+  tau_max = tau_candidates,
+  Starting_SSE = starting_tau_checks
+)
+
+print(
+  starting_check_table
+)
+
+
+
+# STOP BEFORE OPTIMIZATION IF ANY MODEL CANNOT RUN
+
+if (any(is.na(starting_tau_checks))) {
+  
+  stop(
+    paste(
+      "At least one kernel model failed before optimization.",
+      "Read the error printed immediately above."
+    )
+  )
+}
+
+
+
+# FIT EACH tau_max
+
+tau_results <- data.frame()
+
+
+for (tau_value in tau_candidates) {
+  
+  cat(
+    "\n-----------------------------------\n"
+  )
+  
+  cat(
+    "FITTING tau_max =",
+    tau_value,
+    "\n"
+  )
+  
+  
+  fit_tau <- optim(
+    par = unname(kernel_start),
+    
+    fn = function(x) {
+      
+      kernel_objective_tau(
+        x = x,
+        tau_value = tau_value
+      )
+      
+    },
+    
+    method = "L-BFGS-B",
+    
+    lower = unname(kernel_lower),
+    
+    upper = unname(kernel_upper),
+    
+    control = list(
+      maxit = 1000,
+      
+      parscale = c(
+        0.20,
+        0.03,
+        500,
+        2,
+        2,
+        0.50
+      )
+    )
+  )
+  
+  
+  fitted_params <- setNames(
+    fit_tau$par,
+    kernel_parameter_names
+  )
+  
+  
+  penalized_value <-
+    fit_tau$value /
+    (
+      n_independent -
+        2 * 6
+    )
+  
+  
+  tau_results <- rbind(
+    tau_results,
+    
+    data.frame(
+      Model = "Kernel",
+      tau_max = tau_value,
+      
+      gamma_max =
+        fitted_params["gamma_max"],
+      
+      delta_max =
+        fitted_params["delta_max"],
+      
+      E_star =
+        fitted_params["E_star"],
+      
+      a =
+        fitted_params["a"],
+      
+      b =
+        fitted_params["b"],
+      
+      p =
+        fitted_params["p"],
+      
+      SSE =
+        fit_tau$value,
+      
+      Penalized_SSQ =
+        penalized_value,
+      
+      Convergence =
+        fit_tau$convergence,
+      
+      Message =
+        ifelse(
+          is.null(fit_tau$message),
+          "",
+          fit_tau$message
+        ),
+      
+      row.names = NULL
+    )
+  )
+  
+  
+  cat(
+    "Final SSE:",
+    fit_tau$value,
+    "\n"
+  )
+  
+  cat(
+    "Estimated p:",
+    fitted_params["p"],
+    "\n"
+  )
+  
+  cat(
+    "Convergence:",
+    fit_tau$convergence,
+    "\n"
+  )
+}
+
+
+
+# ADD THE INSTANTANEOUS MODEL
+
+instantaneous_row <- data.frame(
+  Model = "Instantaneous",
+  tau_max = NA_real_,
+  
+  gamma_max =
+    unname(
+      estimated_instantaneous_params["gamma_max"]
+    ),
+  
+  delta_max =
+    unname(
+      estimated_instantaneous_params["delta_max"]
+    ),
+  
+  E_star =
+    unname(
+      estimated_instantaneous_params["E_star"]
+    ),
+  
+  a =
+    unname(
+      estimated_instantaneous_params["a"]
+    ),
+  
+  b =
+    unname(
+      estimated_instantaneous_params["b"]
+    ),
+  
+  p = NA_real_,
+  
+  SSE =
+    instantaneous_fit$value,
+  
+  Penalized_SSQ =
+    instantaneous_penalized_ssq,
+  
+  Convergence =
+    instantaneous_fit$convergence,
+  
+  Message =
+    ifelse(
+      is.null(instantaneous_fit$message),
+      "",
+      instantaneous_fit$message
+    ),
+  
+  row.names = NULL
+)
+
+
+
+# COMBINE AND SORT RESULTS
+
+all_model_results <- rbind(
+  instantaneous_row,
+  tau_results
+)
+
+all_model_results <- all_model_results |>
+  arrange(
+    Penalized_SSQ
+  )
+
+
+cat(
+  "\nALL VALID MODEL RESULTS\n"
+)
+
+print(
+  all_model_results
+)
+
+
+cat(
+  "\nBEST MODEL\n"
+)
+
+print(
+  all_model_results[1, ]
+)
+
+
+
+# PLOT MODEL-SELECTION RESULTS
+
+ggplot(
+  tau_results,
+  aes(
+    x = tau_max,
+    y = Penalized_SSQ
+  )
+) +
+  geom_line() +
+  geom_point() +
+  geom_hline(
+    yintercept =
+      instantaneous_penalized_ssq,
+    linetype = "dashed"
+  ) +
+  labs(
+    title =
+      "Model Selection Across Memory Lengths",
+    
+    subtitle =
+      "Dashed line represents the instantaneous-light model",
+    
+    x =
+      expression(tau[max]),
+    
+    y =
+      "Penalized SSQ"
+  ) +
+  theme_minimal()
+```
+
+You can add options to executable code like this
+
+```{r}
+# CHUNK 7
+# SSE OBJECTIVE-SURFACE GRID PLOTS
+# FOR THE REAL-DATA INSTANTANEOUS MODEL
+
+
+# ------------------------------------------------------------
+# STEP 1: CHOOSE THE MODEL TO STUDY
+# ------------------------------------------------------------
+# Start with the instantaneous model because it has 5 parameters
+# and is easier to visualize than the kernel model.
+
+surface_model_type <- "instantaneous"
+
+
+# Use the fitted instantaneous parameters as the center
+surface_center_params <- estimated_instantaneous_params
+
+
+# ------------------------------------------------------------
+# STEP 2: DEFINE PARAMETER GRIDS
+# ------------------------------------------------------------
+# These ranges are centered around the fitted values.
+# You can widen or narrow them later.
+
+param_ranges <- list(
+  gamma_max = seq(
+    max(0.05, 0.5 * surface_center_params["gamma_max"]),
+    min(0.50, 1.5 * surface_center_params["gamma_max"]),
+    length.out = 9
+  ),
+  
+  delta_max = seq(
+    max(0.001, 0.25 * surface_center_params["delta_max"]),
+    min(0.05, 3.0 * surface_center_params["delta_max"]),
+    length.out = 9
+  ),
+  
+  E_star = seq(
+    max(50, 0.4 * surface_center_params["E_star"]),
+    min(5000, 1.6 * surface_center_params["E_star"]),
+    length.out = 9
+  ),
+  
+  a = seq(
+    max(0.1, 0.3 * surface_center_params["a"]),
+    min(30, 2.0 * surface_center_params["a"]),
+    length.out = 9
+  ),
+  
+  b = seq(
+    max(0.1, 0.3 * surface_center_params["b"]),
+    min(10, 1.7 * surface_center_params["b"]),
+    length.out = 9
+  )
+)
+
+
+# ------------------------------------------------------------
+# STEP 3: SSE FUNCTION
+# ------------------------------------------------------------
+
+calculate_sse <- function(W_model, W_obs) {
+  sum((W_obs[-1, ] - W_model[-1, ])^2)
+}
+
+
+# ------------------------------------------------------------
+# STEP 4: MAKE ONE OBJECTIVE SURFACE
+# ------------------------------------------------------------
+
+make_objective_surface <- function(param1, param2) {
+  
+  surface_results <- data.frame()
+  
+  for (value1 in param_ranges[[param1]]) {
+    
+    for (value2 in param_ranges[[param2]]) {
+      
+      test_params <- surface_center_params
+      
+      test_params[param1] <- value1
+      test_params[param2] <- value2
+      
+      W_model <- tryCatch(
+        {
+          predict_size_distribution(
+            params = test_params,
+            model_type = "instantaneous"
+          )
+        },
+        error = function(e) {
+          return(NULL)
+        }
+      )
+      
+      if (is.null(W_model)) {
+        sse_value <- NA
+      } else {
+        sse_value <- calculate_sse(W_model, W_obs)
+      }
+      
+      temp <- data.frame(
+        Pair = paste(param1, param2, sep = "_vs_"),
+        Param1 = param1,
+        Param2 = param2,
+        Param1Value = value1,
+        Param2Value = value2,
+        SSE = sse_value,
+        Log10SSE = ifelse(is.na(sse_value), NA, log10(sse_value))
+      )
+      
+      surface_results <- rbind(surface_results, temp)
+    }
+  }
+  
+  return(surface_results)
+}
+
+
+# ------------------------------------------------------------
+# STEP 5: MAKE SURFACES FOR ALL PARAMETER PAIRS
+# ------------------------------------------------------------
+
+parameter_names <- names(surface_center_params)
+
+pair_list <- combn(parameter_names, 2, simplify = FALSE)
+
+all_surface_results <- data.frame()
+
+for (pair in pair_list) {
+  
+  param1 <- pair[1]
+  param2 <- pair[2]
+  
+  cat(
+    "\nMaking surface for:",
+    param1, "vs", param2, "\n"
+  )
+  
+  pair_surface <- make_objective_surface(param1, param2)
+  
+  all_surface_results <- rbind(all_surface_results, pair_surface)
+}
+
+cat("\nFIRST ROWS OF SURFACE RESULTS\n")
+print(head(all_surface_results))
+
+
+# Save the full grid results
+write.csv(
+  all_surface_results,
+  "real_data_instantaneous_objective_surfaces.csv",
+  row.names = FALSE
+)
+
+
+# ------------------------------------------------------------
+# STEP 6: PLOT ONE SURFACE
+# ------------------------------------------------------------
+
+make_surface_plot <- function(pair_name, use_log = TRUE) {
+  
+  plot_data <- subset(all_surface_results, Pair == pair_name)
+  
+  param1_name <- unique(plot_data$Param1)
+  param2_name <- unique(plot_data$Param2)
+  
+  fitted_x <- surface_center_params[param1_name]
+  fitted_y <- surface_center_params[param2_name]
+  
+  if (use_log) {
+    fill_variable <- "Log10SSE"
+    fill_label <- expression(log[10]("SSE"))
+    title_extra <- "log10(SSE)"
+  } else {
+    fill_variable <- "SSE"
+    fill_label <- "SSE"
+    title_extra <- "SSE"
+  }
+  
+  ggplot(
+    plot_data,
+    aes(
+      x = Param1Value,
+      y = Param2Value,
+      fill = .data[[fill_variable]]
+    )
+  ) +
+    geom_tile(color = "white") +
+    geom_point(
+      data = data.frame(x = fitted_x, y = fitted_y),
+      aes(x = x, y = y),
+      inherit.aes = FALSE,
+      shape = 8,
+      size = 4,
+      color = "black"
+    ) +
+    scale_fill_gradientn(
+      colors = c("blue", "cyan", "yellow", "red"),
+      na.value = "grey80"
+    ) +
+    labs(
+      title = paste("Objective surface:", param1_name, "vs", param2_name),
+      subtitle = paste(
+        "Real data |",
+        title_extra,
+        "| black star = fitted parameter pair"
+      ),
+      x = paste("Value of", param1_name),
+      y = paste("Value of", param2_name),
+      fill = fill_label
+    ) +
+    theme_minimal()
+}
+
+
+# ------------------------------------------------------------
+# STEP 7: MAKE ALL SURFACE PLOTS
+# ------------------------------------------------------------
+
+pair_names <- unique(all_surface_results$Pair)
+
+surface_plots <- list()
+
+for (pair_name in pair_names) {
+  
+  p <- make_surface_plot(pair_name, use_log = TRUE)
+  
+  surface_plots[[pair_name]] <- p
+  
+  print(p)
+  
+  ggsave(
+    filename = paste0("real_data_surface_", pair_name, ".png"),
+    plot = p,
+    width = 7,
+    height = 5
+  )
+}
+
+
+# ------------------------------------------------------------
+# STEP 8: FIND THE BEST GRID POINT FOR EACH PAIR
+# ------------------------------------------------------------
+
+best_grid_points <- data.frame()
+
+for (pair_name in pair_names) {
+  
+  plot_data <- subset(all_surface_results, Pair == pair_name)
+  
+  plot_data <- plot_data[!is.na(plot_data$SSE), ]
+  
+  best_row <- plot_data[which.min(plot_data$SSE), ]
+  
+  best_grid_points <- rbind(best_grid_points, best_row)
+}
+
+cat("\nBEST GRID POINT FOR EACH PARAMETER PAIR\n")
+print(best_grid_points)
+
+write.csv(
+  best_grid_points,
+  "best_grid_points_real_data_instantaneous.csv",
+  row.names = FALSE
+)
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).

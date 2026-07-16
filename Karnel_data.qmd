@@ -15,7 +15,7 @@ When you click the **Render** button a document will be generated that includes 
 ```{r}
 # ALL-DAYS MODEL SELECTION FOR THE 2012 SYNECHOCOCCUS DATA
 #
-# This script:
+
 #   1. reads and cleans the full GitHub data,
 #   2. finds every complete 24-hour period,
 #   3. fits the instantaneous-light model for each period,
@@ -37,7 +37,7 @@ library(here)
 library(ggplot2)
 
 
-RUN_ALL_DAYS <- FALSE
+RUN_ALL_DAYS <- TRUE
 
 # If TRUE, an interrupted all-days run will reuse the progress CSV
 # and skip dates already completed.
@@ -65,9 +65,7 @@ if (!dir.exists(output_folder)) {
   )
 }
 
-# ------------------------------------------------------------
-# READ THE THREE REAL-DATA FILES
-# ------------------------------------------------------------
+## fitted data 
 
 light_raw <- read_csv(
   here(
@@ -93,9 +91,7 @@ volume_data <- read_csv(
   show_col_types = FALSE
 )
 
-# ------------------------------------------------------------
-# CLEAN DATE-TIME COLUMNS
-# ------------------------------------------------------------
+### clean data 
 
 light_raw <- light_raw |>
   mutate(

@@ -1,0 +1,1 @@
+{"frames":[{"func":"stop(\n    paste(\n      \"At least one kernel model failed before optimization.\",\n      \"Read the error printed immediately above.\" ...","file":"","line_number":3,"end_line_number":8,"character_number":3,"end_character_number":3}],"message":"Error: At least one kernel model failed before optimization. Read the error printed immediately above.\n"}
