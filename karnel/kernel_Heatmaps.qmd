@@ -1,0 +1,781 @@
+---
+title: "KArnel KArnel"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+rm(list = ls())
+
+library(reshape2)
+library(ggplot2)
+
+
+############################################################
+# MODEL SETTINGS
+############################################################
+
+m <- 57
+hours <- 24
+
+v_min <- 2^(-5)
+delta_v <- 0.125
+
+size_index <- 1:m
+
+v_i <- v_min * 2^((size_index - 1) * delta_v)
+
+
+############################################################
+# TRUE PARAMETERS
+############################################################
+
+gamma_max_true <- 0.20
+delta_max_true <- 0.03
+E_star_true <- 500
+a_true <- 2
+b_true <- 2
+
+# Kernel memory-decay parameter
+p_true <- 0.40
+
+# tau_max is fixed, not estimated
+tau_max <- 33
+
+true_params <- c(
+  gamma_max = gamma_max_true,
+  delta_max = delta_max_true,
+  E_star = E_star_true,
+  a = a_true,
+  b = b_true,
+  p = p_true
+)
+
+
+############################################################
+# PERIODIC LIGHT FUNCTION
+############################################################
+
+E_t <- function(t) {
+  
+  # Keeps time within a repeating 24-hour cycle
+  t_mod <- t %% 24
+  
+  E <- 1000 * max(
+    0,
+    sin(2 * pi * t_mod / 24)
+  )
+  
+  return(E)
+}
+
+
+# Plot instantaneous light
+
+time_grid <- seq(0, 48, by = 0.1)
+
+light_values <- sapply(
+  time_grid,
+  E_t
+)
+
+plot(
+  time_grid,
+  light_values,
+  type = "l",
+  lwd = 2,
+  xlab = "Hours",
+  ylab = "E(t)",
+  main = "Instantaneous Light"
+)
+
+
+############################################################
+# GEOMETRIC KERNEL WEIGHTS
+############################################################
+
+kernel_weights <- function(p, tau_max) {
+  
+  # Prevent p from becoming exactly 0 or 1
+  p <- min(
+    max(p, 1e-8),
+    1 - 1e-8
+  )
+  
+  tau_values <- 0:tau_max
+  
+  weights <- p * (1 - p)^tau_values
+  
+  # Normalize so all weights add to 1
+  weights <- weights / sum(weights)
+  
+  return(weights)
+}
+
+
+############################################################
+# EFFECTIVE LIGHT CHI(t)
+############################################################
+
+E_kernel <- function(t, p, tau_max) {
+  
+  tau_values <- 0:tau_max
+  
+  weights <- kernel_weights(
+    p = p,
+    tau_max = tau_max
+  )
+  
+  light_values <- sapply(
+    tau_values,
+    function(tau) {
+      E_t(t - tau)
+    }
+  )
+  
+  chi <- sum(
+    weights * light_values
+  )
+  
+  return(chi)
+}
+
+
+############################################################
+# KERNEL-DEPENDENT GROWTH FUNCTION
+############################################################
+
+gamma_t <- function(
+    t,
+    gamma_max,
+    E_star,
+    p,
+    tau_max
+) {
+  
+  chi_t <- E_kernel(
+    t = t,
+    p = p,
+    tau_max = tau_max
+  )
+  
+  gamma <- gamma_max *
+    (1 - exp(-chi_t / E_star))
+  
+  return(gamma)
+}
+
+
+############################################################
+# DIVISION FUNCTION
+############################################################
+
+delta_i_t <- function(t, delta_max, a, b) {
+  
+  # Division begins at hour 6
+  if (t < 6) {
+    return(rep(0, m))
+  }
+  
+  delta_i <- delta_max *
+    ((a * v_i)^b /
+       (1 + (a * v_i)^b))
+  
+  return(delta_i)
+}
+
+
+############################################################
+# MATRIX A(t)
+############################################################
+
+matrix_A <- function(
+    t,
+    gamma_max,
+    delta_max,
+    E_star,
+    a,
+    b,
+    p,
+    tau_max
+) {
+  
+  A <- matrix(
+    0,
+    nrow = m,
+    ncol = m
+  )
+  
+  # Growth depends on kernel-weighted light
+  gamma <- gamma_t(
+    t = t,
+    gamma_max = gamma_max,
+    E_star = E_star,
+    p = p,
+    tau_max = tau_max
+  )
+  
+  delta_i <- delta_i_t(
+    t = t,
+    delta_max = delta_max,
+    a = a,
+    b = b
+  )
+  
+  # Number of size classes corresponding to doubling
+  j <- as.integer(
+    1 + 1 / delta_v
+  )
+  
+  
+  ##########################################################
+  # GROWTH
+  ##########################################################
+  
+  # Cells move to the next larger size class
+  
+  for (i in 1:(m - 1)) {
+    
+    A[i + 1, i] <-
+      A[i + 1, i] +
+      gamma * (1 - delta_i[i])
+  }
+  
+  
+  # Largest cells stay in the largest class
+  # if they grow without dividing
+  
+  A[m, m] <-
+    A[m, m] +
+    gamma * (1 - delta_i[m])
+  
+  
+  ##########################################################
+  # DIVISION
+  ##########################################################
+  
+  # Small cells that divide produce daughters in class 1
+  
+  for (i in 2:(j - 1)) {
+    
+    A[1, i] <-
+      A[1, i] +
+      2 * delta_i[i]
+  }
+  
+  
+  # Larger cells produce daughters approximately
+  # half the parent's volume
+  
+  for (i in j:m) {
+    
+    smaller_class <- i + 1 - j
+    
+    A[smaller_class, i] <-
+      A[smaller_class, i] +
+      2 * delta_i[i]
+  }
+  
+  
+  ##########################################################
+  # STASIS
+  ##########################################################
+  
+  # Class 1 includes cells that stay and daughters
+  # produced by division of class-1 cells
+  
+  A[1, 1] <-
+    A[1, 1] +
+    ((1 - gamma) * (1 - delta_i[1])) +
+    2 * delta_i[1]
+  
+  
+  for (i in 2:(m - 1)) {
+    
+    A[i, i] <-
+      A[i, i] +
+      (1 - gamma) * (1 - delta_i[i])
+  }
+  
+  
+  # Largest size class
+  
+  A[m, m] <-
+    A[m, m] +
+    (1 - gamma) * (1 - delta_i[m])
+  
+  
+  return(A)
+}
+
+
+############################################################
+# MATRIX B(t)
+#
+# One hour consists of six ten-minute A matrices
+############################################################
+
+matrix_B <- function(
+    t,
+    gamma_max,
+    delta_max,
+    E_star,
+    a,
+    b,
+    p,
+    tau_max,
+    dt = 1 / 6
+) {
+  
+  # Start with the 57 x 57 identity matrix
+  B <- diag(m)
+  
+  n_steps <- as.integer(
+    round(1 / dt)
+  )
+  
+  for (k in 0:(n_steps - 1)) {
+    
+    time_now <- t + k * dt
+    
+    A_k <- matrix_A(
+      t = time_now,
+      gamma_max = gamma_max,
+      delta_max = delta_max,
+      E_star = E_star,
+      a = a,
+      b = b,
+      p = p,
+      tau_max = tau_max
+    )
+    
+    # After the loop:
+    # B = A_5 %*% A_4 %*% ... %*% A_0
+    
+    B <- A_k %*% B
+  }
+  
+  return(B)
+}
+
+
+############################################################
+# INITIAL SIZE DISTRIBUTION w(0)
+############################################################
+
+w0 <- dnorm(
+  size_index,
+  mean = 20,
+  sd = 6
+)
+
+w0 <- w0 / sum(w0)
+
+plot(
+  v_i,
+  w0,
+  type = "l",
+  lwd = 2,
+  xlab = "Cell volume",
+  ylab = "Initial proportion",
+  main = "Initial Size Distribution"
+)
+
+
+############################################################
+# TRUE KERNEL MODEL DISTRIBUTION
+############################################################
+
+W_true <- matrix(
+  0,
+  nrow = hours,
+  ncol = m
+)
+
+# First row represents hour 0
+W_true[1, ] <- w0
+
+for (row in 1:(hours - 1)) {
+  
+  # Row 1 corresponds to time 0
+  time_start <- row - 1
+  
+  B_t <- matrix_B(
+    t = time_start,
+    gamma_max = gamma_max_true,
+    delta_max = delta_max_true,
+    E_star = E_star_true,
+    a = a_true,
+    b = b_true,
+    p = p_true,
+    tau_max = tau_max
+  )
+  
+  W_true[row + 1, ] <-
+    B_t %*% W_true[row, ]
+  
+  W_true[row + 1, ] <-
+    W_true[row + 1, ] /
+    sum(W_true[row + 1, ])
+}
+
+
+# Every row should sum to approximately 1
+
+print(rowSums(W_true))
+
+
+############################################################
+# CREATE FAKE OBSERVATIONS
+############################################################
+
+set.seed(123)
+
+N <- 1000000
+
+Counts <- matrix(
+  0,
+  nrow = hours,
+  ncol = m
+)
+
+for (t in 1:hours) {
+  
+  Counts[t, ] <- rmultinom(
+    n = 1,
+    size = N,
+    prob = W_true[t, ]
+  )
+}
+
+W_obs <- Counts / rowSums(Counts)
+
+
+############################################################
+# MODEL FOR GUESSED PARAMETERS
+############################################################
+
+guess_model <- function(params, W) {
+  
+  # params =
+  # c(gamma_max, delta_max, E_star, a, b, p)
+  
+  gamma_max <- params[1]
+  delta_max <- params[2]
+  E_star <- params[3]
+  a <- params[4]
+  b <- params[5]
+  p <- params[6]
+  
+  W_pred <- matrix(
+    0,
+    nrow = hours,
+    ncol = m
+  )
+  
+  # Only the initial observed distribution is used
+  W_pred[1, ] <- W[1, ]
+  
+  for (row in 1:(hours - 1)) {
+    
+    time_start <- row - 1
+    
+    B_t <- matrix_B(
+      t = time_start,
+      gamma_max = gamma_max,
+      delta_max = delta_max,
+      E_star = E_star,
+      a = a,
+      b = b,
+      p = p,
+      tau_max = tau_max
+    )
+    
+    # Predict from the previous predicted distribution
+    W_pred[row + 1, ] <-
+      B_t %*% W_pred[row, ]
+    
+    W_pred[row + 1, ] <-
+      W_pred[row + 1, ] /
+      sum(W_pred[row + 1, ])
+  }
+  
+  return(W_pred)
+}
+
+
+############################################################
+# OBJECTIVE FUNCTION
+############################################################
+
+objective_function <- function(params, W) {
+  
+  gamma_max <- params[1]
+  delta_max <- params[2]
+  E_star <- params[3]
+  a <- params[4]
+  b <- params[5]
+  p <- params[6]
+  
+  
+  # Parameter checks
+  
+  if (
+    gamma_max < 0 ||
+    gamma_max > 0.5 ||
+    delta_max < 0 ||
+    delta_max > 0.15 ||
+    E_star <= 0 ||
+    a <= 0 ||
+    b <= 0 ||
+    p <= 0 ||
+    p >= 1
+  ) {
+    return(1e10)
+  }
+  
+  
+  W_pred <- guess_model(
+    params = params,
+    W = W
+  )
+  
+  
+  # Difference between observed and predicted distributions
+  
+  error <- sum(
+    (W - W_pred)^2
+  )
+  
+  return(error)
+}
+
+
+############################################################
+# FIT THE SIX PARAMETERS
+############################################################
+
+initial_guess <- c(
+  gamma_max = 0.20,
+  delta_max = 0.03,
+  E_star = 500,
+  a = 2,
+  b = 2,
+  p = 0.40
+)
+
+fit <- optim(
+  par = initial_guess,
+  fn = objective_function,
+  W = W_obs,
+  method = "L-BFGS-B",
+  
+  lower = c(
+    gamma_max = 0.001,
+    delta_max = 0.001,
+    E_star = 100,
+    a = 0.1,
+    b = 0.1,
+    p = 0.001
+  ),
+  
+  upper = c(
+    gamma_max = 0.5,
+    delta_max = 0.15,
+    E_star = 5000,
+    a = 30,
+    b = 10,
+    p = 0.999
+  ),
+  
+  control = list(
+    maxit = 1000
+  )
+)
+
+
+estimated_params <- fit$par
+
+
+############################################################
+# PARAMETER RESULTS
+############################################################
+
+results <- data.frame(
+  Parameter = c(
+    "gamma_max",
+    "delta_max",
+    "E_star",
+    "a",
+    "b",
+    "p"
+  ),
+  
+  True = c(
+    gamma_max_true,
+    delta_max_true,
+    E_star_true,
+    a_true,
+    b_true,
+    p_true
+  ),
+  
+  Estimated = estimated_params
+)
+
+results$Percent_Error <- 100 *
+  (results$Estimated - results$True) /
+  results$True
+
+print(results)
+
+cat(
+  "\nOptimization convergence:",
+  fit$convergence,
+  "\n"
+)
+
+cat(
+  "Objective function value:",
+  fit$value,
+  "\n"
+)
+
+
+############################################################
+# FITTED DISTRIBUTION
+############################################################
+
+W_fit <- guess_model(
+  params = estimated_params,
+  W = W_obs
+)
+
+
+############################################################
+# HEATMAP FUNCTION
+############################################################
+
+plot_heatmap <- function(
+    W,
+    title_name,
+    maximum_proportion
+) {
+  
+  df <- melt(W)
+  
+  colnames(df) <- c(
+    "Hour",
+    "SizeClass",
+    "Proportion"
+  )
+  
+  # Matrix row 1 represents hour 0
+  df$Hour <- df$Hour - 1
+  
+  # Convert size-class number into cell volume
+  df$CellVolume <- v_i[df$SizeClass]
+  
+  ggplot(
+    df,
+    aes(
+      x = CellVolume,
+      y = Hour,
+      fill = Proportion
+    )
+  ) +
+    geom_tile() +
+    
+    scale_x_log10() +
+    
+    scale_y_continuous(
+      breaks = seq(0, 23, by = 3)
+    ) +
+    
+    scale_fill_gradientn(
+      colors = c(
+        "blue",
+        "cyan",
+        "yellow",
+        "red"
+      ),
+      limits = c(0, maximum_proportion)
+    ) +
+    
+    labs(
+      title = title_name,
+      subtitle = paste0(
+        "Kernel model: p = ",
+        round(p_true, 2),
+        ", tau_max = ",
+        tau_max
+      ),
+      x = expression(
+        "Cell volume (" * mu * m^3 * ")"
+      ),
+      y = "Hour after dawn",
+      fill = "Proportion"
+    ) +
+    
+    theme_minimal(base_size = 13) +
+    
+    theme(
+      panel.grid = element_blank(),
+      plot.title = element_text(
+        face = "bold"
+      )
+    )
+}
+
+
+############################################################
+# PLOT THE THREE HEATMAPS
+############################################################
+
+# Same color scale for direct comparison
+
+common_max <- max(
+  W_true,
+  W_obs,
+  W_fit
+)
+
+p_true_plot <- plot_heatmap(
+  W = W_true,
+  title_name = "True Kernel Model Distribution",
+  maximum_proportion = common_max
+)
+
+p_obs_plot <- plot_heatmap(
+  W = W_obs,
+  title_name = "Fake Observed Distribution",
+  maximum_proportion = common_max
+)
+
+p_fit_plot <- plot_heatmap(
+  W = W_fit,
+  title_name = "Fitted Kernel Model Distribution",
+  maximum_proportion = common_max
+)
+
+print(p_true_plot)
+print(p_obs_plot)
+print(p_fit_plot)
+```
+
+You can add options to executable code like this
+
+```{r}
+#| echo: false
+2 * 2
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).

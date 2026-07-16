@@ -1,0 +1,1067 @@
+---
+title: "SSE Karnel"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+rm(list = ls())
+
+library(ggplot2)
+library(reshape2)
+
+
+############################################################
+# MODEL SETTINGS
+############################################################
+
+m <- 57
+hours <- 24
+
+v_min <- 2^(-5)
+delta_v <- 0.125
+
+size_index <- 1:m
+
+v_i <- v_min * 2^((size_index - 1) * delta_v)
+
+
+############################################################
+# TRUE PARAMETER VALUES
+############################################################
+
+gamma_max_true <- 0.20
+delta_max_true <- 0.03
+E_star_true <- 500
+a_true <- 2
+b_true <- 1
+
+# Kernel memory-decay parameter
+p_true <- 0.40
+
+# Maximum number of previous hours included
+# This is fixed, not estimated
+tau_max <- 33
+
+
+true_base <- c(
+  gamma_max = gamma_max_true,
+  delta_max = delta_max_true,
+  E_star    = E_star_true,
+  a         = a_true,
+  b         = b_true,
+  p         = p_true
+)
+
+
+############################################################
+# LIGHT FUNCTION
+############################################################
+
+E_t <- function(t) {
+  
+  # Repeats the light cycle every 24 hours
+  t_mod <- t %% 24
+  
+  light <- 1000 * max(
+    0,
+    sin(2 * pi * t_mod / 24)
+  )
+  
+  return(light)
+}
+
+
+############################################################
+# GEOMETRIC KERNEL WEIGHTS
+############################################################
+
+kernel_weights <- function(p, tau_max) {
+  
+  # Prevent p from becoming exactly zero or one
+  p <- min(
+    max(p, 1e-8),
+    1 - 1e-8
+  )
+  
+  tau_values <- 0:tau_max
+  
+  weights <- p * (1 - p)^tau_values
+  
+  # Normalize so that the weights add to one
+  weights <- weights / sum(weights)
+  
+  return(weights)
+}
+
+
+############################################################
+# EFFECTIVE LIGHT USING THE KERNEL
+############################################################
+
+E_kernel <- function(t, p, tau_max) {
+  
+  tau_values <- 0:tau_max
+  
+  weights <- kernel_weights(
+    p = p,
+    tau_max = tau_max
+  )
+  
+  light_values <- sapply(
+    tau_values,
+    function(tau) {
+      E_t(t - tau)
+    }
+  )
+  
+  chi_t <- sum(
+    weights * light_values
+  )
+  
+  return(chi_t)
+}
+
+
+############################################################
+# KERNEL-DEPENDENT GROWTH FUNCTION
+############################################################
+
+gamma_t <- function(
+    t,
+    gamma_max,
+    E_star,
+    p,
+    tau_max
+) {
+  
+  chi_t <- E_kernel(
+    t = t,
+    p = p,
+    tau_max = tau_max
+  )
+  
+  gamma <- gamma_max *
+    (1 - exp(-chi_t / E_star))
+  
+  return(gamma)
+}
+
+
+############################################################
+# DIVISION FUNCTION
+############################################################
+
+delta_i_t <- function(t, delta_max, a, b) {
+  
+  # No division before hour 6
+  if (t < 6) {
+    return(rep(0, m))
+  }
+  
+  delta_i <- delta_max *
+    ((a * v_i)^b /
+       (1 + (a * v_i)^b))
+  
+  return(delta_i)
+}
+
+
+############################################################
+# MATRIX A(t)
+############################################################
+
+matrix_A <- function(
+    t,
+    gamma_max,
+    delta_max,
+    E_star,
+    a,
+    b,
+    p,
+    tau_max
+) {
+  
+  A <- matrix(
+    0,
+    nrow = m,
+    ncol = m
+  )
+  
+  # Kernel-dependent growth rate
+  gamma <- gamma_t(
+    t = t,
+    gamma_max = gamma_max,
+    E_star = E_star,
+    p = p,
+    tau_max = tau_max
+  )
+  
+  # Size-dependent division probabilities
+  delta_i <- delta_i_t(
+    t = t,
+    delta_max = delta_max,
+    a = a,
+    b = b
+  )
+  
+  # Number of size classes corresponding to doubling
+  j <- as.integer(
+    1 + 1 / delta_v
+  )
+  
+  
+  ##########################################################
+  # GROWTH
+  ##########################################################
+  
+  # Cells move to the next larger size class
+  
+  for (i in 1:(m - 1)) {
+    
+    A[i + 1, i] <-
+      A[i + 1, i] +
+      gamma * (1 - delta_i[i])
+  }
+  
+  
+  # Cells in the largest size class remain there
+  # if they grow without dividing
+  
+  A[m, m] <-
+    A[m, m] +
+    gamma * (1 - delta_i[m])
+  
+  
+  ##########################################################
+  # DIVISION
+  ##########################################################
+  
+  # Smaller cells produce daughters in size class 1
+  
+  for (i in 2:(j - 1)) {
+    
+    A[1, i] <-
+      A[1, i] +
+      2 * delta_i[i]
+  }
+  
+  
+  # Larger cells produce daughters approximately
+  # half the size of the parent
+  
+  for (i in j:m) {
+    
+    smaller_class <- i + 1 - j
+    
+    A[smaller_class, i] <-
+      A[smaller_class, i] +
+      2 * delta_i[i]
+  }
+  
+  
+  ##########################################################
+  # STASIS
+  ##########################################################
+  
+  # Size class 1
+  
+  A[1, 1] <-
+    A[1, 1] +
+    ((1 - gamma) * (1 - delta_i[1])) +
+    2 * delta_i[1]
+  
+  
+  # Interior size classes
+  
+  for (i in 2:(m - 1)) {
+    
+    A[i, i] <-
+      A[i, i] +
+      (1 - gamma) * (1 - delta_i[i])
+  }
+  
+  
+  # Largest size class
+  
+  A[m, m] <-
+    A[m, m] +
+    (1 - gamma) * (1 - delta_i[m])
+  
+  
+  return(A)
+}
+
+
+############################################################
+# MATRIX B(t): ONE-HOUR TRANSITION MATRIX
+############################################################
+
+matrix_B <- function(
+    t,
+    gamma_max,
+    delta_max,
+    E_star,
+    a,
+    b,
+    p,
+    tau_max,
+    dt = 1 / 6
+) {
+  
+  # Begin with the 57 by 57 identity matrix
+  B <- diag(m)
+  
+  # Six ten-minute matrices per hour
+  n_steps <- as.integer(
+    round(1 / dt)
+  )
+  
+  for (k in 0:(n_steps - 1)) {
+    
+    time_now <- t + k * dt
+    
+    A_k <- matrix_A(
+      t = time_now,
+      gamma_max = gamma_max,
+      delta_max = delta_max,
+      E_star = E_star,
+      a = a,
+      b = b,
+      p = p,
+      tau_max = tau_max
+    )
+    
+    B <- A_k %*% B
+  }
+  
+  return(B)
+}
+
+
+############################################################
+# INITIAL SIZE DISTRIBUTION
+############################################################
+
+w0 <- dnorm(
+  size_index,
+  mean = 20,
+  sd = 6
+)
+
+w0 <- w0 / sum(w0)
+
+
+plot(
+  v_i,
+  w0,
+  type = "l",
+  lwd = 2,
+  xlab = "Cell volume",
+  ylab = "Initial proportion",
+  main = "Initial Size Distribution"
+)
+
+
+############################################################
+# SIMULATE THE KERNEL MODEL
+############################################################
+
+simulate_model <- function(params) {
+  
+  gamma_max <- params[["gamma_max"]]
+  delta_max <- params[["delta_max"]]
+  E_star <- params[["E_star"]]
+  a <- params[["a"]]
+  b <- params[["b"]]
+  p <- params[["p"]]
+  
+  W <- matrix(
+    0,
+    nrow = hours,
+    ncol = m
+  )
+  
+  # First row represents hour zero
+  W[1, ] <- w0
+  
+  for (row in 1:(hours - 1)) {
+    
+    # First transition starts at hour zero
+    time_start <- row - 1
+    
+    B_t <- matrix_B(
+      t = time_start,
+      gamma_max = gamma_max,
+      delta_max = delta_max,
+      E_star = E_star,
+      a = a,
+      b = b,
+      p = p,
+      tau_max = tau_max
+    )
+    
+    W[row + 1, ] <-
+      B_t %*% W[row, ]
+    
+    # Normalize to obtain proportions
+    W[row + 1, ] <-
+      W[row + 1, ] /
+      sum(W[row + 1, ])
+  }
+  
+  return(W)
+}
+
+
+############################################################
+# HEATMAP FUNCTION
+############################################################
+
+plot_heatmap <- function(
+    W,
+    title_name,
+    maximum_proportion = max(W)
+) {
+  
+  df <- melt(W)
+  
+  colnames(df) <- c(
+    "Hour",
+    "SizeClass",
+    "Proportion"
+  )
+  
+  # Matrix row 1 represents hour zero
+  df$Hour <- df$Hour - 1
+  
+  df$CellVolume <- v_i[df$SizeClass]
+  
+  heatmap_plot <- ggplot(
+    df,
+    aes(
+      x = CellVolume,
+      y = Hour,
+      fill = Proportion
+    )
+  ) +
+    geom_tile() +
+    
+    scale_x_log10() +
+    
+    scale_y_continuous(
+      breaks = seq(0, 23, by = 3)
+    ) +
+    
+    scale_fill_gradientn(
+      colors = c(
+        "blue",
+        "cyan",
+        "yellow",
+        "red"
+      ),
+      limits = c(0, maximum_proportion)
+    ) +
+    
+    labs(
+      title = title_name,
+      subtitle = paste0(
+        "p = ",
+        p_true,
+        ", tau_max = ",
+        tau_max
+      ),
+      x = expression(
+        "Cell volume (" * mu * m^3 * ")"
+      ),
+      y = "Hour after dawn",
+      fill = "Proportion"
+    ) +
+    
+    theme_minimal() +
+    
+    theme(
+      panel.grid = element_blank()
+    )
+  
+  return(heatmap_plot)
+}
+
+
+############################################################
+# GENERATE THE TRUE KERNEL HEATMAP
+############################################################
+
+W_true <- simulate_model(
+  params = true_base
+)
+
+
+# Check that every hourly distribution adds to one
+
+print(
+  rowSums(W_true)
+)
+
+
+############################################################
+# CREATE FAKE OBSERVATIONS
+############################################################
+
+set.seed(123)
+
+N <- 1000000
+
+Counts <- matrix(
+  0,
+  nrow = hours,
+  ncol = m
+)
+
+
+for (t in 1:hours) {
+  
+  Counts[t, ] <- rmultinom(
+    n = 1,
+    size = N,
+    prob = W_true[t, ]
+  )
+}
+
+
+W_obs <- Counts / rowSums(Counts)
+
+
+############################################################
+# PLOT TRUE AND FAKE OBSERVED HEATMAPS
+############################################################
+
+common_heatmap_max <- max(
+  W_true,
+  W_obs
+)
+
+
+p_true_heatmap <- plot_heatmap(
+  W = W_true,
+  title_name = "True Kernel Model Heatmap",
+  maximum_proportion = common_heatmap_max
+)
+
+
+p_observed_heatmap <- plot_heatmap(
+  W = W_obs,
+  title_name = "Fake Observed Kernel Heatmap",
+  maximum_proportion = common_heatmap_max
+)
+
+
+print(p_true_heatmap)
+print(p_observed_heatmap)
+
+
+############################################################
+# SSE OBJECTIVE-SURFACE ANALYSIS
+############################################################
+
+
+############################################################
+# STEP 1: PARAMETER GRIDS
+############################################################
+
+# Six parameters produce 15 unique parameter pairs.
+#
+# You can temporarily use fewer grid points to test the code:
+# grid_points <- 7
+
+grid_points <- 15
+
+
+param_ranges <- list(
+  
+  gamma_max = seq(
+    0.10,
+    0.30,
+    length.out = grid_points
+  ),
+  
+  delta_max = seq(
+    0.01,
+    0.08,
+    length.out = grid_points
+  ),
+  
+  E_star = seq(
+    100,
+    1000,
+    length.out = grid_points
+  ),
+  
+  a = seq(
+    0.5,
+    4,
+    length.out = grid_points
+  ),
+  
+  b = seq(
+    0.5,
+    4,
+    length.out = grid_points
+  ),
+  
+  p = seq(
+    0.10,
+    0.80,
+    length.out = grid_points
+  )
+)
+
+
+############################################################
+# STEP 2: CALCULATE SUM OF SQUARED ERROR
+############################################################
+
+calculate_sse <- function(W_model, W_obs) {
+  
+  error <- W_obs - W_model
+  
+  sse <- sum(error^2)
+  
+  return(sse)
+}
+
+
+############################################################
+# STEP 3: CREATE ONE TWO-PARAMETER OBJECTIVE SURFACE
+############################################################
+
+make_objective_surface <- function(param1, param2) {
+  
+  number_of_combinations <-
+    length(param_ranges[[param1]]) *
+    length(param_ranges[[param2]])
+  
+  surface_rows <- vector(
+    mode = "list",
+    length = number_of_combinations
+  )
+  
+  result_number <- 1
+  
+  
+  for (value1 in param_ranges[[param1]]) {
+    
+    for (value2 in param_ranges[[param2]]) {
+      
+      # Begin with all parameters at their true values
+      test_params <- true_base
+      
+      # Change only the two selected parameters
+      test_params[param1] <- value1
+      test_params[param2] <- value2
+      
+      # Simulate the kernel model
+      W_model <- simulate_model(
+        params = test_params
+      )
+      
+      # Compare the model with the fake observations
+      sse_value <- calculate_sse(
+        W_model = W_model,
+        W_obs = W_obs
+      )
+      
+      surface_rows[[result_number]] <- data.frame(
+        
+        Pair = paste(
+          param1,
+          param2,
+          sep = "_vs_"
+        ),
+        
+        Param1 = param1,
+        Param2 = param2,
+        
+        Param1Value = value1,
+        Param2Value = value2,
+        
+        SSE = sse_value,
+        Log10SSE = log10(sse_value)
+      )
+      
+      print(
+        paste(
+          "Finished:",
+          param1,
+          "=",
+          round(value1, 4),
+          ",",
+          param2,
+          "=",
+          round(value2, 4),
+          "| SSE =",
+          signif(sse_value, 6)
+        )
+      )
+      
+      result_number <- result_number + 1
+    }
+  }
+  
+  surface_results <- do.call(
+    rbind,
+    surface_rows
+  )
+  
+  return(surface_results)
+}
+
+
+############################################################
+# STEP 4: CREATE ALL PARAMETER PAIRS
+############################################################
+
+parameter_names <- names(true_base)
+
+
+pair_list <- combn(
+  parameter_names,
+  2,
+  simplify = FALSE
+)
+
+
+print(pair_list)
+
+
+############################################################
+# STEP 5: CALCULATE ALL 15 OBJECTIVE SURFACES
+############################################################
+
+all_surface_list <- vector(
+  mode = "list",
+  length = length(pair_list)
+)
+
+
+for (pair_number in seq_along(pair_list)) {
+  
+  current_pair <- pair_list[[pair_number]]
+  
+  param1 <- current_pair[1]
+  param2 <- current_pair[2]
+  
+  cat(
+    "\nStarting objective surface:",
+    param1,
+    "vs",
+    param2,
+    "\n"
+  )
+  
+  all_surface_list[[pair_number]] <-
+    make_objective_surface(
+      param1 = param1,
+      param2 = param2
+    )
+}
+
+
+all_surface_results <- do.call(
+  rbind,
+  all_surface_list
+)
+
+
+############################################################
+# STEP 6: VIEW AND SAVE ALL SSE VALUES
+############################################################
+
+print(all_surface_results)
+
+
+write.csv(
+  all_surface_results,
+  "kernel_objective_surface_results.csv",
+  row.names = FALSE
+)
+
+
+############################################################
+# STEP 7: FUNCTION TO PLOT ONE OBJECTIVE SURFACE
+############################################################
+
+make_surface_plot <- function(
+    pair_name,
+    use_log = TRUE
+) {
+  
+  plot_data <- subset(
+    all_surface_results,
+    Pair == pair_name
+  )
+  
+  param1_name <- unique(
+    plot_data$Param1
+  )
+  
+  param2_name <- unique(
+    plot_data$Param2
+  )
+  
+  true_x <- unname(
+    true_base[param1_name]
+  )
+  
+  true_y <- unname(
+    true_base[param2_name]
+  )
+  
+  
+  if (use_log == TRUE) {
+    
+    fill_variable <- "Log10SSE"
+    fill_title <- expression(log[10]("SSE"))
+    subtitle_text <- "Color represents log10(SSE)"
+    
+  } else {
+    
+    fill_variable <- "SSE"
+    fill_title <- "SSE"
+    subtitle_text <- "Color represents SSE"
+  }
+  
+  
+  surface_plot <- ggplot(
+    plot_data,
+    aes(
+      x = Param1Value,
+      y = Param2Value,
+      fill = .data[[fill_variable]]
+    )
+  ) +
+    
+    geom_tile() +
+    
+    # Black star shows the true parameter pair
+    
+    geom_point(
+      data = data.frame(
+        TrueX = true_x,
+        TrueY = true_y
+      ),
+      aes(
+        x = TrueX,
+        y = TrueY
+      ),
+      inherit.aes = FALSE,
+      shape = 8,
+      size = 4,
+      color = "black"
+    ) +
+    
+    scale_fill_gradientn(
+      colors = c(
+        "blue",
+        "cyan",
+        "yellow",
+        "red"
+      )
+    ) +
+    
+    labs(
+      title = paste(
+        "Kernel objective surface:",
+        param1_name,
+        "vs",
+        param2_name
+      ),
+      subtitle = paste(
+        subtitle_text,
+        "| black star = true values"
+      ),
+      x = paste(
+        "Value of",
+        param1_name
+      ),
+      y = paste(
+        "Value of",
+        param2_name
+      ),
+      fill = fill_title
+    ) +
+    
+    theme_minimal() +
+    
+    theme(
+      plot.title = element_text(
+        face = "bold"
+      )
+    )
+  
+  return(surface_plot)
+}
+
+
+############################################################
+# STEP 8: PLOT AND SAVE ALL OBJECTIVE SURFACES
+############################################################
+
+pair_names <- unique(
+  all_surface_results$Pair
+)
+
+
+surface_plots <- list()
+
+
+for (pair_name in pair_names) {
+  
+  surface_plot <- make_surface_plot(
+    pair_name = pair_name,
+    use_log = TRUE
+  )
+  
+  surface_plots[[pair_name]] <- surface_plot
+  
+  print(surface_plot)
+  
+  ggsave(
+    filename = paste0(
+      "kernel_objective_surface_",
+      pair_name,
+      ".png"
+    ),
+    plot = surface_plot,
+    width = 7,
+    height = 5,
+    dpi = 300
+  )
+}
+
+
+############################################################
+# STEP 9: FIND THE SMALLEST SSE FOR EACH PARAMETER PAIR
+############################################################
+
+best_grid_rows <- vector(
+  mode = "list",
+  length = length(pair_names)
+)
+
+
+for (pair_number in seq_along(pair_names)) {
+  
+  pair_name <- pair_names[pair_number]
+  
+  pair_data <- subset(
+    all_surface_results,
+    Pair == pair_name
+  )
+  
+  best_grid_rows[[pair_number]] <-
+    pair_data[
+      which.min(pair_data$SSE),
+    ]
+}
+
+
+best_grid_points <- do.call(
+  rbind,
+  best_grid_rows
+)
+
+
+############################################################
+# STEP 10: PRINT AND SAVE THE BEST GRID POINTS
+############################################################
+
+print(
+  "Best grid point for each parameter pair:"
+)
+
+print(best_grid_points)
+
+
+write.csv(
+  best_grid_points,
+  "kernel_best_grid_points.csv",
+  row.names = FALSE
+)
+
+
+############################################################
+# STEP 11: COMPARE BEST POINTS WITH TRUE VALUES
+############################################################
+
+best_grid_summary_rows <- vector(
+  mode = "list",
+  length = nrow(best_grid_points)
+)
+
+
+for (row_number in seq_len(nrow(best_grid_points))) {
+  
+  current_row <- best_grid_points[row_number, ]
+  
+  param1_name <- current_row$Param1
+  param2_name <- current_row$Param2
+  
+  best_grid_summary_rows[[row_number]] <- data.frame(
+    
+    Pair = current_row$Pair,
+    
+    Param1 = param1_name,
+    Param1True = unname(
+      true_base[param1_name]
+    ),
+    Param1Best = current_row$Param1Value,
+    
+    Param2 = param2_name,
+    Param2True = unname(
+      true_base[param2_name]
+    ),
+    Param2Best = current_row$Param2Value,
+    
+    MinimumSSE = current_row$SSE
+  )
+}
+
+
+best_grid_summary <- do.call(
+  rbind,
+  best_grid_summary_rows
+)
+
+
+print(
+  "Comparison of the best grid points with the true values:"
+)
+
+print(best_grid_summary)
+
+
+write.csv(
+  best_grid_summary,
+  "kernel_best_grid_summary.csv",
+  row.names = FALSE
+)
+
+```
+
+You can add options to executable code like this
+
+```{r}
+#| echo: false
+2 * 2
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
