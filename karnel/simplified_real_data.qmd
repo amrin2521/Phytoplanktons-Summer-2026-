@@ -1,0 +1,338 @@
+---
+title: "Simplified Real-Data Model Workflow"
+format: html
+editor: visual
+---
+
+## Chunk 1: Load one real day
+
+```{r}
+rm(list = ls())
+
+library(readr)
+library(dplyr)
+library(lubridate)
+library(here)
+library(ggplot2)
+
+light <- read_csv(here("merged_fcb_data_2012", "E_data.csv"),
+                  show_col_types = FALSE)
+cells <- read_csv(here("merged_fcb_data_2012", "cells_size_dist_data.csv"),
+                  show_col_types = FALSE)
+volumes <- read_csv(here("merged_fcb_data_2012", "vol_bins.csv"),
+                    show_col_types = FALSE)
+
+light$date_time <- parse_date_time(
+  light$date_time, c("ymd HMS", "ymd HM", "ymd"), tz = "UTC"
+)
+cells$date_time <- parse_date_time(
+  cells$date_time, c("ymd HMS", "ymd HM", "ymd"), tz = "UTC"
+)
+
+light <- light |>
+  filter(!is.na(date_time), !is.na(E)) |>
+  group_by(date_time) |>
+  summarise(E = mean(E), .groups = "drop")
+
+size_columns <- paste0("w", 1:57)
+
+cells <- cells |>
+  filter(!is.na(date_time)) |>
+  group_by(date_time) |>
+  summarise(
+    across(all_of(size_columns), ~ mean(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+test_start <- ymd_hms("2012-01-14 06:00:00", tz = "UTC")
+
+cell_24 <- cells |>
+  filter(date_time >= test_start,
+         date_time <= test_start + hours(23)) |>
+  arrange(date_time)
+
+light_24 <- light |>
+  filter(date_time >= test_start - hours(33),
+         date_time <= test_start + hours(24)) |>
+  arrange(date_time)
+
+W_obs <- as.matrix(cell_24[, size_columns])
+W_obs <- W_obs / rowSums(W_obs)
+
+v_i <- volumes$v_i
+m <- ncol(W_obs)
+n_hours <- nrow(W_obs)
+delta_v <- 0.125
+
+stopifnot(n_hours == 24, m == 57, length(v_i) == 57)
+
+dim(W_obs)
+range(rowSums(W_obs))
+```
+
+## Chunk 2: Measured and kernel light
+
+```{r}
+light_model <- light_24 |>
+  mutate(
+    model_hour = as.numeric(
+      difftime(date_time, test_start, units = "hours")
+    )
+  )
+
+E_t <- function(t) {
+  pmax(
+    approx(
+      light_model$model_hour,
+      light_model$E,
+      xout = t,
+      method = "linear"
+    )$y,
+    0
+  )
+}
+
+kernel_weights <- function(p, tau_max) {
+  w <- p * (1 - p)^(0:tau_max)
+  w / sum(w)
+}
+
+E_kernel <- function(t, p, tau_max) {
+  tau <- 0:tau_max
+  sum(kernel_weights(p, tau_max) *
+        sapply(tau, function(x) E_t(t - x)))
+}
+```
+
+## Chunk 3: Size-structured model
+
+```{r}
+gamma_t <- function(t, gamma_max, E_star,
+                    model_type, p = NULL, tau_max = NULL) {
+  E_use <- if (model_type == "instantaneous") {
+    E_t(t)
+  } else {
+    E_kernel(t, p, tau_max)
+  }
+
+  gamma_max * (1 - exp(-E_use / E_star))
+}
+
+# No t < 6 restriction
+delta_i_t <- function(delta_max, a, b) {
+  delta_max * ((a * v_i)^b / (1 + (a * v_i)^b))
+}
+
+matrix_A <- function(t, gamma_max, delta_max, E_star, a, b,
+                     model_type, p = NULL, tau_max = NULL) {
+  A <- matrix(0, m, m)
+
+  gamma <- gamma_t(
+    t, gamma_max, E_star, model_type, p, tau_max
+  )
+  delta_i <- delta_i_t(delta_max, a, b)
+  j <- as.integer(1 + 1 / delta_v)
+
+  for (i in 1:(m - 1)) {
+    A[i + 1, i] <- A[i + 1, i] +
+      gamma * (1 - delta_i[i])
+  }
+
+  A[m, m] <- A[m, m] +
+    gamma * (1 - delta_i[m])
+
+  for (i in 2:(j - 1)) {
+    A[1, i] <- A[1, i] + 2 * delta_i[i]
+  }
+
+  for (i in j:m) {
+    A[i + 1 - j, i] <- A[i + 1 - j, i] +
+      2 * delta_i[i]
+  }
+
+  A[1, 1] <- A[1, 1] +
+    (1 - gamma) * (1 - delta_i[1]) +
+    2 * delta_i[1]
+
+  for (i in 2:(m - 1)) {
+    A[i, i] <- A[i, i] +
+      (1 - gamma) * (1 - delta_i[i])
+  }
+
+  A[m, m] <- A[m, m] +
+    (1 - gamma) * (1 - delta_i[m])
+
+  A
+}
+
+matrix_B <- function(t, gamma_max, delta_max, E_star, a, b,
+                     model_type, p = NULL, tau_max = NULL) {
+  B <- diag(m)
+
+  for (k in 0:5) {
+    A_k <- matrix_A(
+      t + k / 6, gamma_max, delta_max, E_star, a, b,
+      model_type, p, tau_max
+    )
+    B <- A_k %*% B
+  }
+
+  B
+}
+
+predict_model <- function(params, model_type, tau_max = 33) {
+  W <- matrix(0, n_hours, m)
+  W[1, ] <- W_obs[1, ]
+
+  for (row in 1:(n_hours - 1)) {
+    B <- matrix_B(
+      row - 1,
+      params["gamma_max"],
+      params["delta_max"],
+      params["E_star"],
+      params["a"],
+      params["b"],
+      model_type,
+      if (model_type == "kernel") params["p"] else NULL,
+      tau_max
+    )
+
+    W[row + 1, ] <- B %*% W[row, ]
+    W[row + 1, ] <- W[row + 1, ] / sum(W[row + 1, ])
+  }
+
+  W
+}
+```
+
+## Chunk 4: Fit and compare
+
+```{r}
+fit_model <- function(model_type, tau_max = 33) {
+  if (model_type == "instantaneous") {
+    start <- c(gamma_max = 0.20, delta_max = 0.03,
+               E_star = 500, a = 2, b = 2)
+    lower <- c(0.001, 0.001, 10, 0.1, 0.1)
+    upper <- c(0.5, 0.15, 5000, 30, 10)
+  } else {
+    start <- c(gamma_max = 0.20, delta_max = 0.03,
+               E_star = 500, a = 2, b = 2, p = 0.90)
+    lower <- c(0.001, 0.001, 10, 0.1, 0.1, 0.001)
+    upper <- c(0.5, 0.15, 5000, 30, 10, 0.999)
+  }
+
+  objective <- function(x) {
+    names(x) <- names(start)
+
+    W_pred <- tryCatch(
+      predict_model(x, model_type, tau_max),
+      error = function(e) NULL
+    )
+
+    if (is.null(W_pred)) return(1e10)
+
+    sum((W_obs[-1, ] - W_pred[-1, ])^2)
+  }
+
+  fit <- optim(
+    start, objective,
+    method = "L-BFGS-B",
+    lower = lower,
+    upper = upper,
+    control = list(maxit = 1000)
+  )
+
+  n <- (n_hours - 1) * (m - 1)
+  k <- length(start)
+
+  list(
+    parameters = fit$par,
+    SSE = fit$value,
+    Penalized_SSQ = fit$value / (n - 2 * k),
+    convergence = fit$convergence
+  )
+}
+
+instantaneous_fit <- fit_model("instantaneous")
+kernel_fit <- fit_model("kernel", tau_max = 33)
+
+comparison <- data.frame(
+  Model = c("Instantaneous", "Kernel"),
+  SSE = c(instantaneous_fit$SSE, kernel_fit$SSE),
+  Penalized_SSQ = c(
+    instantaneous_fit$Penalized_SSQ,
+    kernel_fit$Penalized_SSQ
+  ),
+  Convergence = c(
+    instantaneous_fit$convergence,
+    kernel_fit$convergence
+  )
+) |>
+  arrange(Penalized_SSQ)
+
+instantaneous_fit$parameters
+kernel_fit$parameters
+comparison
+```
+
+## Chunk 5: Two SSE grid plots
+
+```{r}
+center <- instantaneous_fit$parameters
+
+make_surface <- function(param1, values1, param2, values2) {
+  grid <- expand.grid(
+    Param1Value = values1,
+    Param2Value = values2
+  )
+
+  grid$SSE <- apply(grid, 1, function(x) {
+    test <- center
+    test[param1] <- x[1]
+    test[param2] <- x[2]
+
+    W_pred <- predict_model(
+      test,
+      model_type = "instantaneous"
+    )
+
+    sum((W_obs[-1, ] - W_pred[-1, ])^2)
+  })
+
+  grid$Log10SSE <- log10(grid$SSE)
+
+  ggplot(
+    grid,
+    aes(Param1Value, Param2Value, fill = Log10SSE)
+  ) +
+    geom_tile() +
+    geom_point(
+      data = data.frame(
+        x = unname(center[param1]),
+        y = unname(center[param2])
+      ),
+      aes(x, y),
+      inherit.aes = FALSE,
+      shape = 8,
+      size = 4
+    ) +
+    labs(
+      title = paste(param1, "versus", param2),
+      subtitle = "Black star = fitted parameter pair",
+      x = param1,
+      y = param2,
+      fill = "log10(SSE)"
+    ) +
+    theme_minimal()
+}
+
+make_surface(
+  "gamma_max", seq(0.08, 0.22, length.out = 15),
+  "delta_max", seq(0.001, 0.015, length.out = 15)
+)
+
+make_surface(
+  "a", seq(0.5, 2.0, length.out = 15),
+  "b", seq(2, 9, length.out = 15)
+)
+```
